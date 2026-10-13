@@ -1,0 +1,92 @@
+require('dotenv').config();
+
+const { loadConfig } = require('./config');
+const initializeDatabase = require('./database/initDatabase');
+const EmailModel = require('./models/emailModel');
+const ApiKeyModel = require('./models/apiKeyModel');
+const { createApp } = require('./server');
+const { createIngest } = require('./mail/ingest');
+const { createSmtpServer, listen: listenSmtp } = require('./mail/smtpServer');
+const { logToFile } = require('./utils/logger');
+
+const HOUR_MS = 60 * 60 * 1000;
+
+function scheduleRetention(emailModel, retentionDays) {
+    if (!retentionDays) return;
+    const purge = async () => {
+        try {
+            const cutoff = new Date(Date.now() - retentionDays * 24 * HOUR_MS);
+            const deleted = await emailModel.deleteOlderThan(cutoff);
+            if (deleted) logToFile(`Retention: deleted ${deleted} email(s) older than ${retentionDays} day(s)`);
+        } catch (error) {
+            logToFile(`Retention cleanup failed: ${error.message}`);
+        }
+    };
+    purge();
+    setInterval(purge, HOUR_MS).unref();
+}
+
+async function main() {
+    const config = loadConfig();
+    if (config.authDisabled) {
+        logToFile('WARNING: AUTH_DISABLED=true - the API and dashboard are open to anyone who can reach this server');
+    }
+
+    const db = await initializeDatabase();
+    const emailModel = new EmailModel(db);
+    // Dashboard-created API keys are encrypted with a key derived from SESSION_SECRET
+    const apiKeyModel = new ApiKeyModel(db, { encryptionSecret: config.sessionSecret });
+    const activeKeys = (await apiKeyModel.list()).filter(k => !k.revokedAt).length;
+    if (!config.authDisabled && activeKeys === 0) {
+        logToFile('No API keys yet: sign in to the dashboard and create one on the API keys page');
+    }
+    scheduleRetention(emailModel, config.retentionDays);
+
+    const ingest = createIngest({ emailModel });
+    const app = createApp({ config, emailModel, apiKeyModel, ingest });
+    const server = app.listen(config.port, () => {
+        logToFile(`Dashboard and API are running on http://localhost:${config.port}`);
+    });
+
+    const smtp = createSmtpServer({ config, ingest });
+    const smtpPort = await listenSmtp(smtp, { port: config.smtpPort, host: config.smtpHost });
+    logToFile(
+        `SMTP server is listening on ${config.smtpHost}:${smtpPort} ` +
+        (config.smtpUsername ? '(login required)' : '(any or no login accepted)')
+    );
+
+    handleShutdown({ server, smtp, db });
+}
+
+// Stop accepting connections, let in-flight requests finish, then close the database.
+// Without this, `docker stop` waits its full timeout and then kills the process.
+function handleShutdown({ server, smtp, db }) {
+    let shuttingDown = false;
+    const shutdown = signal => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        logToFile(`${signal} received, shutting down`);
+        setTimeout(() => {
+            logToFile('Shutdown timed out, exiting');
+            process.exit(1);
+        }, 8000).unref();
+        const closeSmtp = new Promise(resolve => smtp.close(resolve));
+        const closeHttp = new Promise(resolve => server.close(resolve));
+        server.closeIdleConnections();
+        Promise.all([closeSmtp, closeHttp]).then(async () => {
+            try {
+                await db.close();
+            } catch (error) {
+                logToFile(`Error closing database: ${error.message}`);
+            }
+            process.exit(0);
+        });
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+}
+
+main().catch(error => {
+    logToFile(`Startup failed: ${error.stack || error}`);
+    process.exit(1);
+});
