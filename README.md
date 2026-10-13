@@ -13,7 +13,8 @@ Built with Node.js and Express, using [`smtp-server`](https://github.com/nodemai
   - Each email opens with tabs: **HTML** (sandboxed preview), **Text**, **Links**, **Headers**, **Attachments** (downloadable) and **Raw**, plus one-click **Copy code** for verification codes and **Download .eml**.
   - **Send test**: store a test email from the dashboard, with the equivalent `swaks` command.
   - **Setup & API**: SMTP settings and copyable examples generated for your server.
-- **API for tests**: `GET /api/emails/latest?to=user@example.com` returns the newest email with the detected one-time `code` and every `link` in it, which is what E2E tests need for sign-up and password-reset flows.
+- **API for tests**: `GET /api/emails/latest?to=user@example.com` returns the newest email with the detected one-time `code` and every `link` in it, which is what E2E tests need for sign-up and password-reset flows. `GET /api/emails/wait` waits for the email to arrive, `DELETE /api/emails?to=…` empties an inbox between tests, and a [small client](#end-to-end-tests) wraps it all (`waitForCode`, `waitForLink`).
+- **Webhook** on every received email (optionally signed), for CI jobs and other services.
 - API keys managed in the dashboard (Read keys for tests), an admin token for scripts, a password-protected dashboard and optional read-only viewer accounts.
 - Light and dark themes, input validation, rate limiting, security headers, optional automatic cleanup of old emails, and daily-rotated logs. Email content is never logged.
 
@@ -32,6 +33,9 @@ email-test-service
 │   ├── mail
 │   │   ├── smtpServer.js         # smtp-server: accepts mail, optional login, size limit
 │   │   ├── ingest.js             # Raw message in, stored email out (SMTP and "Send test")
+│   │   ├── events.js             # Wakes up requests waiting in /api/emails/wait
+│   │   ├── webhook.js            # POSTs each received email to WEBHOOK_URL
+│   │   ├── present.js            # Adds the code and links to an email for the API
 │   │   ├── parse.js              # mailparser: MIME to the stored record
 │   │   └── compose.js            # Builds the raw message for "Send test"
 │   ├── controllers/emailController.js
@@ -41,6 +45,7 @@ email-test-service
 │   ├── database                  # SQLite (node:sqlite), PostgreSQL, MySQL
 │   ├── utils                     # otp.js, links.js, apiKeys.js, session.js, logger.js, time.js
 │   └── views                     # Dashboard (static files)
+├── client                        # Zero-dependency helper for E2E tests (index.js + index.d.ts)
 ├── test                          # node:test suites (npm test)
 ├── .github/workflows             # docker.yml: tests, publishes the image. release.yml: GitHub Release
 ├── scripts/release.js            # Bumps the version, tags and pushes (starts the release workflows)
@@ -124,7 +129,7 @@ Summaries (no bodies), newest first.
 | Query parameter | Default | Description |
 |-----------------|---------|-------------|
 | `search` | — | Matches subject, sender, recipients or text body (case-insensitive) |
-| `to` | — | Recipient address (To, Cc, or the SMTP envelope, so Bcc too) contains this value |
+| `to` | — | Exact recipient address, case-insensitive, in To, Cc or the SMTP envelope (so Bcc too). `alice@example.com` does not match `malice@example.com`; use `search` for partial matches |
 | `from` | — | Sender address or name contains this value |
 | `subject` | — | Subject contains this value |
 | `startDate` / `endDate` | — | `YYYY-MM-DD` in UTC, `endDate` inclusive |
@@ -166,7 +171,57 @@ const res = await fetch(`${MAIL_URL}/api/emails/latest?to=${encodeURIComponent(e
 const { code, links } = await res.json();
 ```
 
-Poll until it returns `200` if your application sends the mail asynchronously.
+Your application usually sends the mail a moment after the action, so use `/api/emails/wait` below instead of polling this.
+
+### `GET /api/emails/wait`
+
+A long poll that takes the same filters as `GET /api/emails` and answers as soon as a matching email exists, with the same body as `/latest`. An email that is already stored is returned immediately; otherwise the request waits up to `timeout` seconds (default `30`, at most `120`) and answers `408` if nothing arrives. Use a unique recipient per test, or `after`, so a test doesn't pick up an older email.
+
+```
+curl -H "Authorization: Bearer $API_KEY" "http://localhost:30004/api/emails/wait?to=user@example.com&timeout=15"
+```
+
+## End-to-end tests
+
+The `client/` folder holds a dependency-free helper (Node 18+; copy `client/index.js`, plus `index.d.ts` for TypeScript, into your test project). It reads `MAIL_URL` and `MAIL_API_KEY` by default:
+
+```js
+const { createClient } = require('./client');
+const mail = createClient({ baseUrl: 'http://localhost:30004', apiKey: process.env.MAIL_API_KEY });
+
+test('sign-up sends a verification code', async ({ page }) => {
+  const to = `user-${Date.now()}@example.com`;       // a unique recipient keeps tests apart
+  await signUp(page, to);                            // your app sends the email
+  const code = await mail.waitForCode({ to });       // waits up to 30 s, throws EmailTimeoutError otherwise
+  await page.fill('#code', code);
+});
+
+const link = await mail.waitForLink({ to, match: /verify/ });   // first link containing "verify"
+const email = await mail.waitForEmail({ to, subject: 'Welcome' });   // the whole email
+await mail.clearInbox(to);                           // admin token only: deletes everything sent to that address
+```
+
+| Method | Description |
+|--------|-------------|
+| `waitForEmail({ to, from, subject, search, after, timeout })` | The email, waiting for it if needed. Throws `EmailTimeoutError` |
+| `waitForCode(options)` | The detected one-time code of the next matching email |
+| `waitForLink({ ...options, match })` | The first link, or the first matching a string, `RegExp` or function |
+| `latestEmail(filters)` / `listEmails(options)` / `getEmail(id)` | Read without waiting (`latestEmail` returns `null` when there is none) |
+| `clearInbox(to)` / `deleteEmail(id)` | Delete (admin token) |
+
+Give the helper a **Read** key for the `wait*` and read methods, and the `ADMIN_TOKEN` when the tests also clear inboxes.
+
+## Webhook
+
+Set `WEBHOOK_URL` and the service POSTs JSON to it for every email it stores:
+
+```json
+{ "event": "email.received", "email": { "id": 7, "subject": "Verify your email address", "from": { "name": "", "address": "shop@example.com" },
+  "to": [{ "name": "", "address": "user@example.com" }], "envelope": { "from": "shop@example.com", "to": ["user@example.com"] },
+  "code": "482913", "links": ["https://app.example.com/verify?token=abc"], "attachments": [], "snippet": "…", "timestamp": "2026-01-01T10:00:00.000Z" } }
+```
+
+The bodies and headers are not included; fetch `GET /api/emails/:id` for them. With `WEBHOOK_SECRET` set, the request carries `X-Signature-256: sha256=<hex HMAC-SHA256 of the raw body>`, so the receiver can check it came from this service. Delivery is best effort: 5 second timeout, no retries, and a failure is logged without affecting mail reception.
 
 ### Other endpoints
 
@@ -178,7 +233,7 @@ Poll until it returns `200` if your application sends the mail asynchronously.
 | `GET` | `/api/emails/:id/preview` | The HTML (or text) body as a locked-down page, for embedding |
 | `POST` | `/api/emails/test` | Admin. Store a test email: `{ "from", "fromName"?, "to": "a@x.com, b@x.com", "subject"?, "text"?, "html"? }` (text or html required) |
 | `DELETE` | `/api/emails/:id` | Admin. Delete an email and its attachments (`404` if it doesn't exist) |
-| `DELETE` | `/api/emails` | Admin. Delete several (up to 500): `{ "ids": [1, 2, 3] }` |
+| `DELETE` | `/api/emails` | Admin. Delete several (up to 500): `{ "ids": [1, 2, 3] }`. Or empty one inbox: `?to=user@example.com` (other filters narrow it further). One of the two is required, so a bare `DELETE` deletes nothing |
 | `GET` / `POST` / `DELETE` | `/api/keys` … | Admin. List, create (`{ "name": "ci-tests" }`), reveal (`POST /:id/reveal`) and revoke keys |
 | `GET` | `/api/info` | SMTP port and whether SMTP login is required (used by the dashboard) |
 | `GET` | `/health` | Public. `{ "status": "ok" }` when the database is reachable, `503` otherwise |
@@ -243,6 +298,8 @@ See `sample.env` for a commented template.
 | `SMTP_HOST` | `0.0.0.0` | Interface the SMTP server listens on |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | — | Optional. Set both to require SMTP login |
 | `MAX_EMAIL_SIZE_MB` | `10` | Largest accepted message |
+| `WEBHOOK_URL` | — | Optional. POSTed to for every stored email (see [Webhook](#webhook)) |
+| `WEBHOOK_SECRET` | — | Optional. Signs webhook requests (`X-Signature-256`) |
 | `ADMIN_USERNAME` | `admin` | Dashboard username |
 | `ADMIN_PASSWORD` | — | Required. Dashboard password |
 | `VIEWER_USERS` | — | Optional read-only dashboard accounts |

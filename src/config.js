@@ -35,6 +35,9 @@ function loadConfig(env = process.env) {
         smtpUsername: env.SMTP_USERNAME || '',
         smtpPassword: env.SMTP_PASSWORD || '',
         maxEmailBytes: toInt(env.MAX_EMAIL_SIZE_MB, 10) * 1024 * 1024,
+        // POSTed to for every stored email (see src/mail/webhook.js); signed when a secret is set
+        webhookUrl: (env.WEBHOOK_URL || '').trim(),
+        webhookSecret: env.WEBHOOK_SECRET || '',
         adminToken: env.ADMIN_TOKEN || '',
         adminUsername: (env.ADMIN_USERNAME || 'admin').trim(),
         adminPassword: env.ADMIN_PASSWORD || '',
@@ -46,6 +49,10 @@ function loadConfig(env = process.env) {
         apiRateLimit: toInt(env.API_RATE_LIMIT, 120),
         retentionDays: toInt(env.RETENTION_DAYS, 0),
     };
+
+    if (config.webhookUrl && !/^https?:\/\/[^\s/]+/i.test(config.webhookUrl)) {
+        throw new Error('WEBHOOK_URL must be an http:// or https:// URL');
+    }
 
     if (!config.authDisabled) {
         const problems = [];
