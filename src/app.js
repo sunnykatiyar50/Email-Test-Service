@@ -6,6 +6,8 @@ const EmailModel = require('./models/emailModel');
 const ApiKeyModel = require('./models/apiKeyModel');
 const { createApp } = require('./server');
 const { createIngest } = require('./mail/ingest');
+const { createEvents } = require('./mail/events');
+const { createWebhook } = require('./mail/webhook');
 const { createSmtpServer, listen: listenSmtp } = require('./mail/smtpServer');
 const { logToFile } = require('./utils/logger');
 
@@ -42,8 +44,11 @@ async function main() {
     }
     scheduleRetention(emailModel, config.retentionDays);
 
-    const ingest = createIngest({ emailModel });
-    const app = createApp({ config, emailModel, apiKeyModel, ingest });
+    const events = createEvents();
+    const webhook = createWebhook({ url: config.webhookUrl, secret: config.webhookSecret });
+    if (webhook) logToFile(`Webhook enabled: new emails are POSTed to ${new URL(config.webhookUrl).host}`);
+    const ingest = createIngest({ emailModel, events, webhook });
+    const app = createApp({ config, emailModel, apiKeyModel, ingest, events });
     const server = app.listen(config.port, () => {
         logToFile(`Dashboard and API are running on http://localhost:${config.port}`);
     });

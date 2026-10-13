@@ -61,7 +61,17 @@ class EmailModel {
             columns.forEach(() => params.push(likeTerm(term)));
         };
         if (search) matchAny(['subject', 'from_address', 'from_name', 'to_addresses', 'envelope_to', 'text_body'], search);
-        if (to) matchAny(['to_addresses', 'cc_addresses', 'envelope_to'], to);
+        if (to) {
+            // An exact address (case-insensitive) in To, Cc or the SMTP envelope (so Bcc too), not a substring:
+            // "alice@example.com" must not match "malice@example.com". The columns hold JSON, so the
+            // address is matched as a whole JSON string.
+            const address = JSON.stringify(to.toLowerCase());
+            const escaped = text => `%${text.replace(/[!%_]/g, '!$&')}%`;
+            clauses.push(
+                "(LOWER(to_addresses) LIKE ? ESCAPE '!' OR LOWER(cc_addresses) LIKE ? ESCAPE '!' OR LOWER(envelope_to) LIKE ? ESCAPE '!')"
+            );
+            params.push(escaped(`"address":${address}`), escaped(`"address":${address}`), escaped(address));
+        }
         if (from) matchAny(['from_address', 'from_name'], from);
         if (subject) matchAny(['subject'], subject);
         if (after) {
@@ -179,6 +189,16 @@ class EmailModel {
         const placeholders = ids.map(() => '?').join(', ');
         await this.db.run(`DELETE FROM attachments WHERE email_id IN (${placeholders})`, ids);
         return this.db.run(`DELETE FROM emails WHERE id IN (${placeholders})`, ids);
+    }
+
+    // Deletes every email matching the filters (and their attachments); returns how many were removed
+    async deleteMatching(filters) {
+        const { where, params } = this.buildFilters(filters);
+        const rows = await this.db.all(`SELECT id FROM emails ${where}`, params);
+        const ids = rows.map(row => Number(row.id));
+        let deleted = 0;
+        for (let i = 0; i < ids.length; i += 500) deleted += await this.deleteMany(ids.slice(i, i + 500));
+        return deleted;
     }
 
     async deleteOlderThan(date) {

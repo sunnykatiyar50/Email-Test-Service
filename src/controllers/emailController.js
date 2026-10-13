@@ -1,6 +1,5 @@
 const { logToFile } = require('../utils/logger');
-const { extractOtp } = require('../utils/otp');
-const { extractLinks } = require('../utils/links');
+const { presentEmail } = require('../mail/present');
 const { buildRawMessage } = require('../mail/compose');
 
 const escapeHtml = value =>
@@ -12,25 +11,17 @@ const PREVIEW_CSP =
     "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; " +
     "frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox";
 
+const CLIENT_GONE = Symbol('client gone');
+
 class EmailController {
-    constructor(emailModel, ingest) {
+    constructor(emailModel, ingest, events) {
         this.emailModel = emailModel;
         this.ingest = ingest;
+        this.events = events;
     }
 
-    // The email as the API returns it. Attachments get a download URL; full emails also get the detected
-    // one-time code and the links found in the body.
     present(email) {
-        const presented = { ...email };
-        if (email.attachments) {
-            presented.attachments = email.attachments.map(a => ({
-                ...a,
-                url: `/api/emails/${email.id}/attachments/${a.id}`,
-            }));
-            presented.code = extractOtp(email.text || '');
-            presented.links = extractLinks(email.text, email.html);
-        }
-        return presented;
+        return presentEmail(email);
     }
 
     async getEmails(req, res) {
@@ -48,6 +39,41 @@ class EmailController {
         const email = await this.emailModel.latest(req.listQuery.filters);
         if (!email) return res.status(404).json({ error: 'No matching email found.' });
         res.status(200).json(this.present(email));
+    }
+
+    // Long poll for the E2E tests: answers as soon as an email matching the filters exists, including one that
+    // is already stored, or with 408 after `timeout` seconds. Use `after` (or a unique recipient per test) so
+    // an older email isn't picked up.
+    async waitForEmail(req, res) {
+        const { filters, timeout } = req.listQuery;
+        const existing = await this.emailModel.latest(filters);
+        if (existing) return res.status(200).json(this.present(existing));
+
+        const result = await new Promise(resolve => {
+            let settled = false;
+            const finish = value => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                this.events.off('email', check);
+                res.off('close', onClose);
+                resolve(value);
+            };
+            const check = () =>
+                this.emailModel.latest(filters).then(
+                    email => email && finish(email),
+                    error => finish(error)
+                );
+            const onClose = () => finish(CLIENT_GONE); // the caller hung up
+            const timer = setTimeout(() => finish(null), timeout * 1000);
+            this.events.on('email', check);
+            res.on('close', onClose);
+        });
+
+        if (result === CLIENT_GONE) return undefined;
+        if (result instanceof Error) throw result;
+        if (!result) return res.status(408).json({ error: `No matching email arrived within ${timeout} seconds.` });
+        return res.status(200).json(this.present(result));
     }
 
     async getEmail(req, res) {
@@ -124,7 +150,12 @@ class EmailController {
     }
 
     async deleteEmails(req, res) {
-        const { ids } = req.validated;
+        const { ids, filters } = req.validated;
+        if (filters) {
+            const deleted = await this.emailModel.deleteMatching(filters);
+            logToFile(`Cleared ${deleted} email(s) for one recipient`);
+            return res.status(200).json({ message: 'Emails deleted successfully.', deleted });
+        }
         const deleted = await this.emailModel.deleteMany(ids);
         logToFile(`Deleted ${deleted} email(s): ${ids.join(', ')}`);
         if (req.params.id !== undefined && deleted === 0) {

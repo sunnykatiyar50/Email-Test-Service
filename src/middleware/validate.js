@@ -2,6 +2,8 @@
 
 const MAX_PAGE_SIZE = 100;
 const MAX_BULK_DELETE = 500;
+const DEFAULT_WAIT_SECONDS = 30;
+const MAX_WAIT_SECONDS = 120;
 const MAX_RECIPIENTS = 20;
 const MAX_SUBJECT = 255;
 const MAX_BODY = 200000;
@@ -40,6 +42,12 @@ function validateListQuery(req, res, next) {
         errors.pageSize = `must be between 1 and ${MAX_PAGE_SIZE}`;
     }
 
+    // Only GET /api/emails/wait uses it: how long to wait for a matching email
+    const timeout = str('timeout') ? Number(str('timeout')) : DEFAULT_WAIT_SECONDS;
+    if (!Number.isFinite(timeout) || timeout < 1 || timeout > MAX_WAIT_SECONDS) {
+        errors.timeout = `must be between 1 and ${MAX_WAIT_SECONDS} seconds`;
+    }
+
     let after = null;
     let before = null;
     if (str('after')) {
@@ -62,6 +70,7 @@ function validateListQuery(req, res, next) {
     req.listQuery = {
         page,
         pageSize,
+        timeout,
         filters: {
             search: str('search').slice(0, 200),
             to: str('to').slice(0, 320),
@@ -107,6 +116,18 @@ function validateIdList(req, res, next) {
     next();
 }
 
+// DELETE /api/emails: either { "ids": [...] } in the body, or a recipient in the query (?to=user@example.com,
+// optionally narrowed by the other filters) to empty one inbox. Never "delete everything": without ids,
+// a `to` address is required.
+function validateBulkDelete(req, res, next) {
+    const to = typeof req.query.to === 'string' ? req.query.to.trim() : '';
+    if (!to) return validateIdList(req, res, next);
+    validateListQuery(req, res, () => {
+        req.validated = { filters: req.listQuery.filters };
+        next();
+    });
+}
+
 // The dashboard's "Send test" form: from, to (comma separated), subject, text and/or html
 function validateTestEmail(req, res, next) {
     const body = req.body && typeof req.body === 'object' ? req.body : {};
@@ -143,6 +164,7 @@ module.exports = {
     validateListQuery,
     validateIdParam,
     validateIdList,
+    validateBulkDelete,
     validateAttachmentParams,
     validateTestEmail,
 };

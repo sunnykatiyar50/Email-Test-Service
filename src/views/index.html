@@ -311,14 +311,15 @@
 
                 <article class="card">
                     <h3>Read emails from scripts and tests</h3>
-                    <p class="hint">Send <code>Authorization: Bearer &lt;key&gt;</code> (or <code>X-API-Key</code>) with a <b>Read</b> key from the <a href="#/keys">API keys</a> page, or <code>ADMIN_TOKEN</code> (everything, including delete).</p>
+                    <p class="hint">Send <code>Authorization: Bearer &lt;key&gt;</code> (or <code>X-API-Key</code>) with a <b>Read</b> key from the <a href="#/keys">API keys</a> page, or <code>ADMIN_TOKEN</code> (everything, including delete). Tests can use the <code>client/</code> helper (<code>waitForCode</code>, <code>waitForLink</code>); see the README.</p>
                     <table class="ref-table endpoints">
                         <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails/latest?to=…</code><br>Newest matching email with its body, or 404. Includes <code>code</code> (the detected one-time code, or <code>null</code>) and <code>links</code> (every http(s) link)</td></tr>
-                        <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails</code><br>Summaries without bodies. Filters: <code>search</code>, <code>to</code>, <code>from</code>, <code>subject</code>, <code>startDate</code>, <code>endDate</code>, <code>after</code>, <code>before</code>, <code>page</code>, <code>pageSize</code> (max 100)</td></tr>
+                        <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails/wait?to=…&amp;timeout=30</code><br>Waits for a matching email (one that is already stored is returned at once), or answers <code>408</code>. Same body as <code>/latest</code>; <code>timeout</code> is 1&ndash;120 seconds</td></tr>
+                        <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails</code><br>Summaries without bodies. Filters: <code>search</code>, <code>to</code> (exact address), <code>from</code>, <code>subject</code>, <code>startDate</code>, <code>endDate</code>, <code>after</code>, <code>before</code>, <code>page</code>, <code>pageSize</code> (max 100)</td></tr>
                         <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails/:id</code><br>One email: <code>text</code>, <code>html</code>, <code>headers</code>, <code>attachments</code> (each with a download <code>url</code>)</td></tr>
                         <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails/:id/raw</code><br>The original message (add <code>?download=true</code> for an .eml file)</td></tr>
                         <tr><th><span class="method method-delete">DELETE</span></th><td><code>/api/emails/:id</code></td></tr>
-                        <tr><th><span class="method method-delete">DELETE</span></th><td><code>/api/emails</code> with <code>{ "ids": [1, 2] }</code></td></tr>
+                        <tr><th><span class="method method-delete">DELETE</span></th><td><code>/api/emails</code> with <code>{ "ids": [1, 2] }</code>, or <code>/api/emails?to=user@example.com</code> to empty one inbox</td></tr>
                         <tr><th><span class="method method-get">GET</span></th><td><code>/health</code><br>Public; <code>{ "status": "ok" }</code> when the database is reachable</td></tr>
                     </table>
 

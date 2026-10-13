@@ -10,7 +10,7 @@ const { logToFile } = require('./utils/logger');
 const viewsDir = path.join(__dirname, 'views');
 
 // Builds the Express app. Kept separate from app.js so tests can create it with their own config and database.
-function createApp({ config, emailModel, apiKeyModel, ingest }) {
+function createApp({ config, emailModel, apiKeyModel, ingest, events }) {
     const app = express();
     const auth = createAuth(config, { apiKeyModel });
 
@@ -70,7 +70,7 @@ function createApp({ config, emailModel, apiKeyModel, ingest }) {
             smtpUsername: req.auth.isAdmin ? config.smtpUsername || null : null,
         });
     });
-    app.use('/api/emails', createEmailRoutes({ emailModel, ingest, auth, config }));
+    app.use('/api/emails', createEmailRoutes({ emailModel, ingest, events, auth, config }));
     app.use('/api/keys', createApiKeyRoutes({ apiKeyModel, auth, config }));
     app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

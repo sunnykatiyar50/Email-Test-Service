@@ -4,14 +4,14 @@ const EmailController = require('../controllers/emailController');
 const {
     validateListQuery,
     validateIdParam,
-    validateIdList,
+    validateBulkDelete,
     validateAttachmentParams,
     validateTestEmail,
 } = require('../middleware/validate');
 
-function createEmailRoutes({ emailModel, ingest, auth, config }) {
+function createEmailRoutes({ emailModel, ingest, events, auth, config }) {
     const router = express.Router();
-    const controller = new EmailController(emailModel, ingest);
+    const controller = new EmailController(emailModel, ingest, events);
 
     const testLimiter = rateLimit({
         windowMs: 60 * 1000,
@@ -24,6 +24,7 @@ function createEmailRoutes({ emailModel, ingest, auth, config }) {
     // Reading: a Read key, a viewer, or an admin
     router.get('/', auth.requireRead, validateListQuery, (req, res) => controller.getEmails(req, res));
     router.get('/latest', auth.requireRead, validateListQuery, (req, res) => controller.getLatestEmail(req, res));
+    router.get('/wait', auth.requireRead, validateListQuery, (req, res) => controller.waitForEmail(req, res));
     router.get('/:id', auth.requireRead, validateIdParam, (req, res) => controller.getEmail(req, res));
     router.get('/:id/preview', auth.requireRead, validateIdParam, (req, res) => controller.getPreview(req, res));
     router.get('/:id/raw', auth.requireRead, validateIdParam, (req, res) => controller.getRaw(req, res));
@@ -33,7 +34,7 @@ function createEmailRoutes({ emailModel, ingest, auth, config }) {
 
     // Adding a test email and deleting: admin only
     router.post('/test', testLimiter, auth.requireAdmin, validateTestEmail, (req, res) => controller.sendTest(req, res));
-    router.delete('/', auth.requireAdmin, validateIdList, (req, res) => controller.deleteEmails(req, res));
+    router.delete('/', auth.requireAdmin, validateBulkDelete, (req, res) => controller.deleteEmails(req, res));
     router.delete('/:id', auth.requireAdmin, validateIdParam, (req, res) => controller.deleteEmails(req, res));
 
     return router;
