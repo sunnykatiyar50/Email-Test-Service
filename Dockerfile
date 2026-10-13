@@ -3,7 +3,7 @@ FROM node:24-slim
 WORKDIR /app
 
 ENV NODE_ENV=production \
-    PORT=30002 \
+    PORT=30004 \
     SMTP_PORT=1025 \
     DB_TYPE=sqlite \
     SQLITE_PATH=/app/data/email-db.sqlite \
@@ -26,8 +26,8 @@ RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
 # Run as the unprivileged node user (UID 1000, GID 1000). Named volumes inherit the ownership above.
 USER node
 
-# 30002: dashboard and API, 1025: SMTP
-EXPOSE 30002 1025
+# 30004: dashboard and API, 1025: SMTP
+EXPOSE 30004 1025
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD node -e "fetch('http://localhost:' + process.env.PORT + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"

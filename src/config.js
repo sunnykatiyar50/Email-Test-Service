@@ -26,7 +26,7 @@ function toInt(value, fallback) {
 
 function loadConfig(env = process.env) {
     const config = {
-        port: toInt(env.PORT, 30002),
+        port: toInt(env.PORT, 30004),
         authDisabled: env.AUTH_DISABLED === 'true',
         // The SMTP server your apps send mail to. With SMTP_USERNAME/SMTP_PASSWORD set, clients must
         // authenticate; without them any (or no) credentials are accepted.

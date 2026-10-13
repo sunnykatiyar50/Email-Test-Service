@@ -23,9 +23,9 @@ services:
     user: 1000:1000
     env_file: .env
     ports:
-      # Dashboard and API: the app listens on PORT from .env (30002 if unset). To listen on one interface
-      # only, prefix an address, e.g. "100.110.180.13:${PORT:-30002}:${PORT:-30002}".
-      - "${PORT:-30002}:${PORT:-30002}"
+      # Dashboard and API: the app listens on PORT from .env (30004 if unset). To listen on one interface
+      # only, prefix an address, e.g. "100.110.180.13:${PORT:-30004}:${PORT:-30004}".
+      - "${PORT:-30004}:${PORT:-30004}"
       # SMTP: where your apps send mail (SMTP_PORT from .env, 1025 if unset)
       - "${SMTP_PORT:-1025}:${SMTP_PORT:-1025}"
     volumes:

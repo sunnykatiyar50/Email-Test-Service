@@ -63,7 +63,7 @@ Generate random values with `node -e "console.log(require('crypto').randomBytes(
 
 Start it from the project root. Then:
 
-1. Open `http://localhost:30002` and sign in with `ADMIN_USERNAME` (default `admin`) and `ADMIN_PASSWORD`.
+1. Open `http://localhost:30004` and sign in with `ADMIN_USERNAME` (default `admin`) and `ADMIN_PASSWORD`.
 2. Point your application's SMTP settings at **`localhost:1025`**.
 3. Send an email. It appears under **Emails**, newest first. **Send test** stores one without an application.
 
@@ -185,7 +185,7 @@ Poll until it returns `200` if your application sends the mail asynchronously.
 
 ## Running with Docker
 
-The image is published to GitHub Container Registry as `ghcr.io/<owner>/email-test-service` for `linux/amd64` and `linux/arm64`, and runs as the unprivileged `node` user (UID 1000). It exposes the dashboard on `30002` and SMTP on `1025`.
+The image is published to GitHub Container Registry as `ghcr.io/<owner>/email-test-service` for `linux/amd64` and `linux/arm64`, and runs as the unprivileged `node` user (UID 1000). It exposes the dashboard on `30004` and SMTP on `1025`.
 
 ```
 cp sample.env .env       # fill in at least ADMIN_PASSWORD and SESSION_SECRET
@@ -193,13 +193,13 @@ docker compose up -d
 docker compose pull && docker compose up -d     # update later
 ```
 
-Dashboard at `http://localhost:30002`, SMTP at `localhost:1025`. Emails and logs are kept in the `email-data` and `email-logs` volumes (`docker compose down -v` deletes them). Keep `SQLITE_PATH` and `LOG_DIR` unset in `.env` when using Docker. For bind mounts instead of volumes, the folders must be writable by UID 1000 (`sudo mkdir -p ./data ./logs && sudo chown -R 1000:1000 ./data ./logs`); the container explains this at startup if not.
+Dashboard at `http://localhost:30004`, SMTP at `localhost:1025`. Emails and logs are kept in the `email-data` and `email-logs` volumes (`docker compose down -v` deletes them). Keep `SQLITE_PATH` and `LOG_DIR` unset in `.env` when using Docker. For bind mounts instead of volumes, the folders must be writable by UID 1000 (`sudo mkdir -p ./data ./logs && sudo chown -R 1000:1000 ./data ./logs`); the container explains this at startup if not.
 
 Without Compose:
 
 ```
 docker run -d --name email-test-service --init --restart unless-stopped \
-  --env-file .env -p 30002:30002 -p 1025:1025 \
+  --env-file .env -p 30004:30004 -p 1025:1025 \
   -v email-data:/app/data -v email-logs:/app/logs \
   ghcr.io/<owner>/email-test-service:latest
 ```
@@ -238,7 +238,7 @@ See `sample.env` for a commented template.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `30002` | Dashboard and API port |
+| `PORT` | `30004` | Dashboard and API port |
 | `SMTP_PORT` | `1025` | SMTP port |
 | `SMTP_HOST` | `0.0.0.0` | Interface the SMTP server listens on |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | — | Optional. Set both to require SMTP login |
