@@ -43,7 +43,7 @@ email-test-service
 │   └── views                     # Dashboard (static files)
 ├── test                          # node:test suites (npm test)
 ├── .github/workflows             # docker.yml: tests, publishes the image. release.yml: GitHub Release
-├── scripts/release.sh            # Bumps the version, tags and pushes (starts the release workflows)
+├── scripts/release.js            # Bumps the version, tags and pushes (starts the release workflows)
 ├── Dockerfile, docker-compose.yml, docker-compose.build.yml, docker-entrypoint.sh
 ├── sample.env
 └── README.md
@@ -219,7 +219,7 @@ npm run release -- patch          # or minor, major, or an exact version like 1.
 npm run release -- minor --dry-run   # shows the new version and the commits since the last tag, changes nothing
 ```
 
-`scripts/release.sh` (needs Git Bash on Windows) checks that you're on an up-to-date `main` with a clean tree, runs the tests, bumps `package.json`, commits, tags `vX.Y.Z` and pushes. Pushing the tag starts two workflows:
+`scripts/release.js` checks that you're on an up-to-date `main` with a clean tree, runs the tests, bumps `package.json`, commits, tags `vX.Y.Z` and pushes. Pushing the tag starts two workflows:
 
 | Workflow | What it does |
 |----------|--------------|

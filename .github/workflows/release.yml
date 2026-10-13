@@ -1,4 +1,4 @@
-# Creates the GitHub Release when a version tag is pushed (scripts/release.sh does this).
+# Creates the GitHub Release when a version tag is pushed (scripts/release.js does this).
 # The image itself is built and published by docker.yml, which runs on the same tag.
 #
 # The release carries a docker-compose.yml pinned to the released image version, and sample.env.
