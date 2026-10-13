@@ -26,11 +26,12 @@ function fail(message) {
     process.exit(1);
 }
 
-// Runs a command in the project root; shell: true lets Windows find npm.cmd
+// Runs a command in the project root. On Windows npm is npm.cmd, which only runs through a shell; git
+// must not, or arguments with spaces (commit and tag messages) get split.
 function run(command, commandArgs, { quiet = false } = {}) {
     const result = spawnSync(command, commandArgs, {
         cwd: root,
-        shell: process.platform === 'win32',
+        shell: process.platform === 'win32' && command === 'npm',
         encoding: 'utf8',
         stdio: quiet ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'inherit', 'inherit'],
     });
