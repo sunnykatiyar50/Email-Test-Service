@@ -1,6 +1,6 @@
 {
   "name": "email-test-service",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "A mock mail server for testing: captures outgoing email over SMTP and shows it in a web dashboard.",
   "main": "src/app.js",
   "scripts": {
