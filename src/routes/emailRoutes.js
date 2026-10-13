@@ -11,7 +11,7 @@ const {
 
 function createEmailRoutes({ emailModel, ingest, events, auth, config }) {
     const router = express.Router();
-    const controller = new EmailController(emailModel, ingest, events);
+    const controller = new EmailController(emailModel, ingest, events, config);
 
     const testLimiter = rateLimit({
         windowMs: 60 * 1000,
@@ -27,12 +27,14 @@ function createEmailRoutes({ emailModel, ingest, events, auth, config }) {
     router.get('/wait', auth.requireRead, validateListQuery, (req, res) => controller.waitForEmail(req, res));
     router.get('/:id', auth.requireRead, validateIdParam, (req, res) => controller.getEmail(req, res));
     router.get('/:id/preview', auth.requireRead, validateIdParam, (req, res) => controller.getPreview(req, res));
+    router.get('/:id/thread', auth.requireRead, validateIdParam, (req, res) => controller.getThread(req, res));
     router.get('/:id/raw', auth.requireRead, validateIdParam, (req, res) => controller.getRaw(req, res));
     router.get('/:id/attachments/:attachmentId', auth.requireRead, validateAttachmentParams, (req, res) =>
         controller.getAttachment(req, res)
     );
 
-    // Adding a test email and deleting: admin only
+    // Adding a test email, deleting, and checking links (the server requests them): admin only
+    router.post('/:id/check-links', auth.requireAdmin, validateIdParam, (req, res) => controller.checkEmailLinks(req, res));
     router.post('/test', testLimiter, auth.requireAdmin, validateTestEmail, (req, res) => controller.sendTest(req, res));
     router.delete('/', auth.requireAdmin, validateBulkDelete, (req, res) => controller.deleteEmails(req, res));
     router.delete('/:id', auth.requireAdmin, validateIdParam, (req, res) => controller.deleteEmails(req, res));

@@ -1,4 +1,5 @@
 const { simpleParser } = require('mailparser');
+const { convert: htmlToText } = require('html-to-text');
 
 const SNIPPET_LENGTH = 200;
 
@@ -33,8 +34,10 @@ async function parseEmail(raw, { envelope = {}, smtpUser = null } = {}) {
 
     let parsed;
     try {
-        // keepCidLinks: leave cid: references in the HTML alone; the dashboard resolves them when previewing
-        parsed = await simpleParser(raw, { keepCidLinks: true });
+        // keepCidLinks: leave cid: references in the HTML alone; the dashboard resolves them when previewing.
+        // skipHtmlToText: `text` is then only ever a real text/plain part, which is how an HTML-only message
+        // is told apart (the text shown for those is derived from the HTML below).
+        parsed = await simpleParser(raw, { keepCidLinks: true, skipHtmlToText: true });
     } catch {
         return {
             ...base,
@@ -45,6 +48,7 @@ async function parseEmail(raw, { envelope = {}, smtpUser = null } = {}) {
             subject: '(could not parse message)',
             snippet: '',
             text: null,
+            textPart: null,
             html: null,
             headers: [],
             attachments: [],
@@ -52,7 +56,16 @@ async function parseEmail(raw, { envelope = {}, smtpUser = null } = {}) {
     }
 
     const [from = { name: '', address: envelopeFrom }] = addressList(parsed.from);
-    const text = typeof parsed.text === 'string' ? parsed.text : null;
+    const html = typeof parsed.html === 'string' ? parsed.html : null;
+    const textPart = typeof parsed.text === 'string' && parsed.text.trim() !== '';
+    let text = textPart ? parsed.text : null;
+    if (!textPart && html) {
+        try {
+            text = htmlToText(html);
+        } catch {
+            text = null; // unusable HTML: the HTML tab still shows what there is
+        }
+    }
     return {
         ...base,
         messageId: parsed.messageId || null,
@@ -62,7 +75,8 @@ async function parseEmail(raw, { envelope = {}, smtpUser = null } = {}) {
         subject: parsed.subject || '',
         snippet: snippetOf(text),
         text,
-        html: typeof parsed.html === 'string' ? parsed.html : null,
+        textPart,
+        html,
         headers: headerList(parsed.headerLines),
         attachments: (parsed.attachments || []).map((a, index) => ({
             filename: a.filename || `attachment-${index + 1}`,

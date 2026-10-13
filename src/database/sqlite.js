@@ -30,10 +30,15 @@ async function connect() {
             raw BLOB,
             size INTEGER NOT NULL DEFAULT 0,
             attachment_count INTEGER NOT NULL DEFAULT 0,
+            has_text_part INTEGER,
             smtp_user TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )`
     );
+    // Added after the table was first introduced
+    if (!db.prepare('PRAGMA table_info(emails)').all().some(c => c.name === 'has_text_part')) {
+        db.exec('ALTER TABLE emails ADD COLUMN has_text_part INTEGER');
+    }
     db.exec('CREATE INDEX IF NOT EXISTS idx_emails_timestamp ON emails (timestamp)');
     db.exec(
         `CREATE TABLE IF NOT EXISTS attachments (

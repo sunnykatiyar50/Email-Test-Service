@@ -1,23 +1,26 @@
 const { logToFile } = require('../utils/logger');
 const { presentEmail } = require('../mail/present');
+const { checkLinks } = require('../mail/linkCheck');
 const { buildRawMessage } = require('../mail/compose');
 
 const escapeHtml = value =>
     String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 // The preview is shown in a sandboxed iframe with this policy: no scripts, no network, no frames of its own.
-// Remote images are blocked (they would also tell the sender the mail was opened); inline images are data: URIs.
-const PREVIEW_CSP =
-    "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; " +
+// Remote images are blocked unless the viewer asks for them with ?images=true (they would tell the sender the
+// mail was opened); inline images are data: URIs.
+const previewPolicy = remoteImages =>
+    `default-src 'none'; img-src data:${remoteImages ? ' http: https:' : ''}; style-src 'unsafe-inline'; font-src data:; ` +
     "frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox";
 
 const CLIENT_GONE = Symbol('client gone');
 
 class EmailController {
-    constructor(emailModel, ingest, events) {
+    constructor(emailModel, ingest, events, config) {
         this.emailModel = emailModel;
         this.ingest = ingest;
         this.events = events;
+        this.config = config;
     }
 
     present(email) {
@@ -129,12 +132,28 @@ class EmailController {
         res.removeHeader('X-Frame-Options');
         res.set({
             'Content-Type': 'text/html; charset=utf-8',
-            'Content-Security-Policy': PREVIEW_CSP,
+            'Content-Security-Policy': previewPolicy(req.query.images === 'true'),
             'Cross-Origin-Resource-Policy': 'same-site',
             'Cache-Control': 'no-store',
         });
         // Links open in a new tab; the page has no other way to navigate
         res.send(`<!DOCTYPE html><meta charset="utf-8"><base target="_blank">${body}`);
+    }
+
+    // The emails in the same conversation (In-Reply-To / References), oldest first. Empty for a single email.
+    async getThread(req, res) {
+        const email = await this.emailModel.get(req.validated.id);
+        if (!email) return res.status(404).json({ error: 'Email not found.' });
+        res.status(200).json({ emails: await this.emailModel.thread(email) });
+    }
+
+    // Requests every link in the email and reports the status of each (admin only, see mail/linkCheck.js)
+    async checkEmailLinks(req, res) {
+        if (!this.config.linkCheck) return res.status(403).json({ error: 'Link checking is turned off (LINK_CHECK=false).' });
+        const email = await this.emailModel.get(req.validated.id);
+        if (!email) return res.status(404).json({ error: 'Email not found.' });
+        const { links } = this.present(email);
+        res.status(200).json(await checkLinks(links));
     }
 
     // Dashboard "Send test": builds a message and stores it exactly like mail received over SMTP

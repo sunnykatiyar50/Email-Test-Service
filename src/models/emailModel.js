@@ -3,7 +3,7 @@ const { toIso } = require('../utils/time');
 const SUMMARY_COLUMNS =
     'id, message_id, from_address, from_name, to_addresses, cc_addresses, envelope_from, envelope_to, ' +
     'subject, snippet, size, attachment_count, smtp_user, timestamp';
-const FULL_COLUMNS = `${SUMMARY_COLUMNS}, text_body, html_body, headers`;
+const FULL_COLUMNS = `${SUMMARY_COLUMNS}, text_body, html_body, headers, has_text_part`;
 
 function parseJson(value, fallback) {
     try {
@@ -118,9 +118,33 @@ class EmailModel {
             ...toSummary(row),
             text: row.text_body ?? null,
             html: row.html_body ?? null,
+            // true: has a real text/plain part, false: HTML only, null: stored before this was recorded
+            hasTextPart: row.has_text_part === null || row.has_text_part === undefined ? null : Number(row.has_text_part) === 1,
             headers: parseJson(row.headers, []),
             attachments: attachments.map(toAttachment),
         };
+    }
+
+    // The emails in the same conversation as `email` (a full email, with its headers): those whose Message-ID
+    // is one it references, and those that mention its Message-ID or the ones it references, oldest first.
+    // Empty when it has no Message-ID, In-Reply-To or References to go by.
+    async thread(email, limit = 50) {
+        const header = name => (email.headers.find(h => h.key.toLowerCase() === name) || {}).value || '';
+        const ids = [
+            ...new Set([email.messageId, ...header('in-reply-to').split(/\s+/), ...header('references').split(/\s+/)].filter(id => /^<[^<>\s]+>$/.test(id || ''))),
+        ].slice(0, 10);
+        if (ids.length === 0) return [];
+        const clauses = [`message_id IN (${ids.map(() => '?').join(', ')})`];
+        const params = [...ids];
+        for (const id of ids) {
+            clauses.push("LOWER(headers) LIKE ? ESCAPE '!'");
+            params.push(likeTerm(id));
+        }
+        const rows = await this.db.all(
+            `SELECT ${SUMMARY_COLUMNS} FROM emails WHERE ${clauses.join(' OR ')} ORDER BY timestamp ASC, id ASC LIMIT ${Number(limit)}`,
+            params
+        );
+        return rows.map(toSummary);
     }
 
     async getRaw(id) {
@@ -151,8 +175,8 @@ class EmailModel {
         const id = Number(
             await this.db.insert(
                 `INSERT INTO emails (message_id, from_address, from_name, to_addresses, cc_addresses, envelope_from, envelope_to,
-                                     subject, snippet, text_body, html_body, headers, raw, size, attachment_count, smtp_user, timestamp)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                     subject, snippet, text_body, html_body, headers, raw, size, attachment_count, has_text_part, smtp_user, timestamp)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     record.messageId,
                     record.from.address,
@@ -169,6 +193,7 @@ class EmailModel {
                     record.raw,
                     record.size,
                     record.attachments.length,
+                    record.textPart === null || record.textPart === undefined ? null : record.textPart ? 1 : 0,
                     record.smtpUser,
                     timestamp,
                 ]

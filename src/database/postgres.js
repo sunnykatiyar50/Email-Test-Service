@@ -37,10 +37,12 @@ async function connect() {
             raw BYTEA,
             size INTEGER NOT NULL DEFAULT 0,
             attachment_count INTEGER NOT NULL DEFAULT 0,
+            has_text_part SMALLINT,
             smtp_user VARCHAR(255),
             timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     `);
+    await pool.query('ALTER TABLE emails ADD COLUMN IF NOT EXISTS has_text_part SMALLINT');
     await pool.query('CREATE INDEX IF NOT EXISTS idx_emails_timestamp ON emails (timestamp)');
     await pool.query(`
         CREATE TABLE IF NOT EXISTS attachments (

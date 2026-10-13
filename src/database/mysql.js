@@ -32,11 +32,19 @@ async function connect() {
             raw LONGBLOB,
             size INT NOT NULL DEFAULT 0,
             attachment_count INT NOT NULL DEFAULT 0,
+            has_text_part TINYINT,
             smtp_user VARCHAR(255),
             timestamp DATETIME(3) NOT NULL,
             INDEX idx_emails_timestamp (timestamp)
         )
     `);
+    const [textPartColumn] = await pool.query(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'emails' AND COLUMN_NAME = 'has_text_part'`
+    );
+    if (textPartColumn.length === 0) {
+        await pool.query('ALTER TABLE emails ADD COLUMN has_text_part TINYINT');
+    }
     await pool.query(`
         CREATE TABLE IF NOT EXISTS attachments (
             id INT AUTO_INCREMENT PRIMARY KEY,

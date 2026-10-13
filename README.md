@@ -10,13 +10,22 @@ Built with Node.js and Express, using [`smtp-server`](https://github.com/nodemai
 - **Full MIME parsing**: text and HTML bodies, multipart messages, encoded headers and names, inline images, attachments, and the raw `.eml`. Bcc recipients are recorded from the SMTP envelope.
 - **Web dashboard** with a resizable sidebar and a resizable detail pane:
   - **Emails**: list with search (subject, addresses, body), date filters, quick time ranges, pagination, bulk delete and keyboard navigation (↑/↓ or j/k).
-  - Each email opens with tabs: **HTML** (sandboxed preview), **Text**, **Links**, **Headers**, **Attachments** (downloadable) and **Raw**, plus one-click **Copy code** for verification codes and **Download .eml**.
+  - Each email opens with tabs: **HTML** (sandboxed preview), **Text**, **Links**, **Checks**, **Headers**, **Attachments** (downloadable), **Thread** and **Raw**, plus one-click **Copy code** for verification codes and **Download .eml**.
+  - The HTML preview has a **Mobile / Tablet / Desktop** width switch, a simulated **Dark** mode, and a **Load images** switch (remote images are blocked by default).
   - **Send test**: store a test email from the dashboard, with the equivalent `swaks` command.
   - **Setup & API**: SMTP settings and copyable examples generated for your server.
 - **API for tests**: `GET /api/emails/latest?to=user@example.com` returns the newest email with the detected one-time `code` and every `link` in it, which is what E2E tests need for sign-up and password-reset flows. `GET /api/emails/wait` waits for the email to arrive, `DELETE /api/emails?to=…` empties an inbox between tests, and a [small client](#end-to-end-tests) wraps it all (`waitForCode`, `waitForLink`).
 - **Webhook** on every received email (optionally signed), for CI jobs and other services.
 - API keys managed in the dashboard (Read keys for tests), an admin token for scripts, a password-protected dashboard and optional read-only viewer accounts.
 - Light and dark themes, input validation, rate limiting, security headers, optional automatic cleanup of old emails, and daily-rotated logs. Email content is never logged.
+
+### Inspecting an email
+
+- **Checks** lists deliverability and rendering problems found in the email, each a *Warning* (likely to cause trouble) or a *Note* (worth a look, maybe intentional):
+  HTML without a plain-text alternative, missing `Message-ID` or `Date`, an empty or ALL-CAPS subject or one with repeated `!!`, images without `alt` text, images or links over `http://`, a tracking pixel, no viewport meta tag, HTML over Gmail's 102 KB clipping limit, no `List-Unsubscribe` header, and an envelope sender whose domain differs from the From domain. `localhost`, `*.local` and `*.test` URLs are not flagged for using `http://`. The findings are also in the API as `checks`.
+- **Links → Check links** (admin) makes the server request every link in the email (HEAD, then GET if the server refuses HEAD; redirects are followed; at most 25 links, 5 seconds each) and shows the status next to each one. Only the status is kept. Because the server requests URLs taken from the email, set `LINK_CHECK=false` to turn this off.
+- **Thread** appears when the email belongs to a conversation: emails are grouped by `Message-ID`, `In-Reply-To` and `References`, oldest first. Click one to open it.
+- **Dark** is a simulation (it inverts the rendered page), not a real dark-mode client. **Load images** lets that email fetch its remote images, which tells the sender it was opened, and goes back to blocking when you reload the page.
 
 ### How the HTML preview stays safe
 
@@ -162,6 +171,8 @@ The newest email matching the same filters (usually `to`), with its full content
 | `attachments` | `[{ "id", "filename", "contentType", "size", "contentId", "url" }]`; `url` downloads the file |
 | `code` | The one-time code detected in the text (4–8 digits, `123-456`, `G-123456`, `AB12CD`, with keywords in several languages), or `null`. Amounts, order numbers, dates and phone numbers are ignored. |
 | `links` | Every http(s) link, from `href` attributes and the text, without duplicates |
+| `checks` | `[{ "level", "code", "message" }]`, where `level` is `warning` or `info`: see [Inspecting an email](#inspecting-an-email) |
+| `hasTextPart` | `true` if the message has a real `text/plain` part, `false` if it is HTML only (`text` is then derived from the HTML), `null` for emails stored before this was recorded |
 
 ```js
 // Playwright / Cypress / Jest
@@ -230,7 +241,9 @@ The bodies and headers are not included; fetch `GET /api/emails/:id` for them. W
 | `GET` | `/api/emails/:id` | One email with its full content (as above) |
 | `GET` | `/api/emails/:id/raw` | The original message as `text/plain`; add `?download=true` for an `.eml` file |
 | `GET` | `/api/emails/:id/attachments/:attachmentId` | Download an attachment |
-| `GET` | `/api/emails/:id/preview` | The HTML (or text) body as a locked-down page, for embedding |
+| `GET` | `/api/emails/:id/preview` | The HTML (or text) body as a locked-down page, for embedding; add `?images=true` to allow remote images |
+| `GET` | `/api/emails/:id/thread` | `{ "emails": [...] }`: summaries of the emails in the same conversation, oldest first (empty if it has no `Message-ID` / `In-Reply-To` / `References` to go by) |
+| `POST` | `/api/emails/:id/check-links` | Admin. Requests each link in the email and returns `{ "results": [{ "url", "ok", "status", "finalUrl", "ms", "error" }], "skipped": 0 }`. `403` when `LINK_CHECK=false` |
 | `POST` | `/api/emails/test` | Admin. Store a test email: `{ "from", "fromName"?, "to": "a@x.com, b@x.com", "subject"?, "text"?, "html"? }` (text or html required) |
 | `DELETE` | `/api/emails/:id` | Admin. Delete an email and its attachments (`404` if it doesn't exist) |
 | `DELETE` | `/api/emails` | Admin. Delete several (up to 500): `{ "ids": [1, 2, 3] }`. Or empty one inbox: `?to=user@example.com` (other filters narrow it further). One of the two is required, so a bare `DELETE` deletes nothing |
@@ -298,6 +311,7 @@ See `sample.env` for a commented template.
 | `SMTP_HOST` | `0.0.0.0` | Interface the SMTP server listens on |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | — | Optional. Set both to require SMTP login |
 | `MAX_EMAIL_SIZE_MB` | `10` | Largest accepted message |
+| `LINK_CHECK` | `true` | `false` turns off the dashboard's link checker (the server requesting the email's links) |
 | `WEBHOOK_URL` | — | Optional. POSTed to for every stored email (see [Webhook](#webhook)) |
 | `WEBHOOK_SECRET` | — | Optional. Signs webhook requests (`X-Signature-256`) |
 | `ADMIN_USERNAME` | `admin` | Dashboard username |

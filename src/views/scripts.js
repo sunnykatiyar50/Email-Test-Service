@@ -377,6 +377,12 @@ function selectMessage(id) {
 // Full emails (bodies, headers, attachments) are fetched when selected. They never change once stored,
 // so each is kept for the rest of the page's life.
 const fullEmails = new Map();
+// Emails in the same conversation, by email id (fetched when an email is selected)
+const threads = new Map();
+// Link check results ({ results, skipped }), by email id
+const linkResults = new Map();
+// Remote images are blocked in the preview; "Load images" lifts that for the emails opened this way
+const imagesAllowed = new Set();
 
 async function fetchFullEmail(id) {
     if (fullEmails.has(id)) return fullEmails.get(id);
@@ -385,6 +391,19 @@ async function fetchFullEmail(id) {
     const email = await response.json();
     fullEmails.set(id, email);
     return email;
+}
+
+async function fetchThread(id) {
+    if (threads.has(id)) return threads.get(id);
+    let emails = [];
+    try {
+        const response = await apiFetch(`/api/emails/${id}/thread`);
+        if (response.ok) emails = (await response.json()).emails || [];
+    } catch {
+        // no thread tab if it can't be loaded
+    }
+    threads.set(id, emails);
+    return emails;
 }
 
 function formatBytes(bytes) {
@@ -440,8 +459,8 @@ function showDetails(summary) {
     $('selectedMessageText').dataset.view = 'loading';
 
     const id = summary.id;
-    fetchFullEmail(id)
-        .then(email => {
+    Promise.all([fetchFullEmail(id), fetchThread(id)])
+        .then(([email]) => {
             if (id === selectedId) renderEmailBody(email);
         })
         .catch(() => {
@@ -455,8 +474,12 @@ function emailViews(email) {
     if (email.html) views.push(['html', 'HTML']);
     views.push(['text', 'Text']);
     if (email.links.length) views.push(['links', `Links (${email.links.length})`]);
+    const warnings = email.checks.filter(c => c.level === 'warning').length;
+    views.push(['checks', warnings ? `Checks (${warnings})` : 'Checks']);
     views.push(['headers', 'Headers']);
     if (email.attachments.length) views.push(['attachments', `Attachments (${email.attachments.length})`]);
+    const thread = threads.get(email.id) || [];
+    if (thread.length > 1) views.push(['thread', `Thread (${thread.length})`]);
     views.push(['raw', 'Raw']);
     return views;
 }
@@ -491,15 +514,15 @@ function renderEmailBody(email, view) {
     if (chosen === 'html') {
         // The page is sandboxed by the server's Content-Security-Policy header (no scripts, no network,
         // opaque origin; see getPreview), so no sandbox attribute is needed here
-        const frame = el('iframe', 'email-frame');
-        frame.title = 'Email preview';
-        frame.src = `/api/emails/${email.id}/preview`;
-        body.appendChild(frame);
-        body.appendChild(el('div', 'frame-note', 'Scripts and remote images are blocked.'));
+        body.appendChild(htmlPreview(email));
     } else if (chosen === 'text') {
         body.appendChild(el('pre', 'formatted-code', email.text || '(no text part)'));
     } else if (chosen === 'links') {
-        body.appendChild(linkList(email.links));
+        body.appendChild(linkList(email, () => renderEmailBody(email, 'links')));
+    } else if (chosen === 'checks') {
+        body.appendChild(checkList(email.checks));
+    } else if (chosen === 'thread') {
+        body.appendChild(threadList(threads.get(email.id) || [], email.id));
     } else if (chosen === 'headers') {
         body.appendChild(headerTable(email.headers));
     } else if (chosen === 'attachments') {
@@ -509,18 +532,161 @@ function renderEmailBody(email, view) {
     }
 }
 
-function linkList(links) {
+// The device widths the HTML preview can emulate
+const PREVIEW_WIDTHS = [
+    ['mobile', 'Mobile', '375px'],
+    ['tablet', 'Tablet', '768px'],
+    ['desktop', 'Desktop', '100%'],
+];
+
+// The sandboxed preview, with device width, simulated dark mode and a switch for remote images
+function htmlPreview(email) {
+    const wrap = el('div', 'preview');
+    const frame = el('iframe', 'email-frame');
+    frame.title = 'Email preview';
+    const holder = el('div', 'frame-holder');
+    holder.appendChild(frame);
+
+    const refresh = () => {
+        const width = readSetting('mail_preview_width', 'desktop');
+        frame.style.width = (PREVIEW_WIDTHS.find(([name]) => name === width) || PREVIEW_WIDTHS[2])[2];
+        // Not a real dark mode: inverts the rendered page, which approximates how clients recolor light emails
+        frame.classList.toggle('dark-sim', readSetting('mail_preview_dark', 'no') === 'yes');
+        const wanted = `/api/emails/${email.id}/preview${imagesAllowed.has(email.id) ? '?images=true' : ''}`;
+        if (frame.getAttribute('src') !== wanted) frame.src = wanted;
+        for (const button of tools.querySelectorAll('[data-width]')) {
+            button.classList.toggle('active', button.dataset.width === width);
+        }
+        dark.classList.toggle('active', frame.classList.contains('dark-sim'));
+        images.classList.toggle('active', imagesAllowed.has(email.id));
+        note.textContent = imagesAllowed.has(email.id)
+            ? 'Remote images are loading: the sender can see this email was opened.'
+            : 'Scripts and remote images are blocked.';
+    };
+
+    const tools = el('div', 'preview-tools');
+    const widths = el('div', 'segmented');
+    for (const [name, label] of PREVIEW_WIDTHS) {
+        const button = el('button', null, label);
+        button.type = 'button';
+        button.dataset.width = name;
+        button.addEventListener('click', () => {
+            saveSetting('mail_preview_width', name);
+            refresh();
+        });
+        widths.appendChild(button);
+    }
+    const dark = el('button', 'ghost small toggle', 'Dark');
+    dark.type = 'button';
+    dark.title = 'Simulate a dark-mode mail client';
+    dark.addEventListener('click', () => {
+        saveSetting('mail_preview_dark', readSetting('mail_preview_dark', 'no') === 'yes' ? 'no' : 'yes');
+        refresh();
+    });
+    const images = el('button', 'ghost small toggle', 'Load images');
+    images.type = 'button';
+    images.title = 'Load remote images (tells the sender the email was opened)';
+    images.addEventListener('click', () => {
+        if (imagesAllowed.has(email.id)) imagesAllowed.delete(email.id);
+        else imagesAllowed.add(email.id);
+        refresh();
+    });
+    tools.append(widths, dark, images);
+
+    const note = el('div', 'frame-note');
+    wrap.append(tools, holder, note);
+    refresh();
+    return wrap;
+}
+
+// Links with a "Check links" button (admin) that reports whether each one resolves
+function linkList(email, rerender) {
+    const wrap = el('div');
+    const checked = linkResults.get(email.id);
+    const byUrl = new Map(checked ? checked.results.map(r => [r.url, r]) : []);
+
+    const bar = el('div', 'link-bar');
+    const check = el('button', 'ghost small admin-only', checked ? 'Check again' : 'Check links');
+    check.type = 'button';
+    check.title = 'The server requests each link and reports the status';
+    check.addEventListener('click', async () => {
+        check.disabled = true;
+        check.textContent = 'Checking…';
+        try {
+            const { response, data } = await apiJson(`/api/emails/${email.id}/check-links`, { method: 'POST' });
+            if (!response.ok) throw new Error(data.error || response.statusText);
+            linkResults.set(email.id, data);
+        } catch (error) {
+            alert(`Could not check the links: ${error.message}`);
+        }
+        rerender();
+    });
+    bar.appendChild(check);
+    if (checked) {
+        const broken = checked.results.filter(r => !r.ok).length;
+        bar.appendChild(el('span', broken ? 'check-summary bad' : 'check-summary good', broken ? `${broken} of ${checked.results.length} broken` : `All ${checked.results.length} links work`));
+        if (checked.skipped) bar.appendChild(el('span', 'muted', `${checked.skipped} more not checked`));
+    }
+    wrap.appendChild(bar);
+
     const list = el('ul', 'link-list');
-    for (const url of links) {
+    for (const url of email.links) {
         const item = el('li');
         const anchor = el('a', null, url);
         anchor.href = url;
         anchor.target = '_blank';
         anchor.rel = 'noopener noreferrer';
+        item.appendChild(anchor);
+        const result = byUrl.get(url);
+        if (result) {
+            const label = result.status ? String(result.status) : result.error || 'failed';
+            const chip = el('span', `status-chip ${result.ok ? 'good' : 'bad'}`, label);
+            chip.title = result.finalUrl ? `Redirects to ${result.finalUrl}` : `${result.ms} ms`;
+            item.appendChild(chip);
+        }
         const copy = el('button', 'ghost small', 'Copy');
         copy.type = 'button';
         copy.addEventListener('click', () => copyText(url, copy));
-        item.append(anchor, copy);
+        item.appendChild(copy);
+        list.appendChild(item);
+    }
+    wrap.appendChild(list);
+    return wrap;
+}
+
+// Deliverability findings from the server (src/mail/analyze.js)
+function checkList(checks) {
+    if (checks.length === 0) return el('div', 'check-empty', 'No issues found.');
+    const list = el('ul', 'check-list');
+    // Warnings first
+    for (const check of [...checks].sort((a, b) => (a.level === b.level ? 0 : a.level === 'warning' ? -1 : 1))) {
+        const item = el('li', check.level);
+        item.appendChild(el('span', `level-tag ${check.level}`, check.level === 'warning' ? 'Warning' : 'Note'));
+        item.appendChild(el('span', null, check.message));
+        list.appendChild(item);
+    }
+    return list;
+}
+
+// The emails in the same conversation; clicking one opens it
+function threadList(emails, currentId) {
+    const list = el('ul', 'thread-list');
+    for (const email of emails) {
+        const item = el('li', email.id === currentId ? 'current' : '');
+        const open = el('button', 'thread-open');
+        open.type = 'button';
+        open.append(
+            el('span', 'thread-from', displayName(email.from)),
+            el('span', 'thread-subject', email.subject || '(no subject)'),
+            el('time', 'muted', email.timestamp ? new Date(email.timestamp).toLocaleString() : '')
+        );
+        open.addEventListener('click', () => {
+            selectedId = email.id;
+            shownEmailId = null; // force the detail pane to load it
+            document.querySelectorAll('.message-row').forEach(row => row.classList.toggle('selected', row.dataset.id === String(email.id)));
+            showDetails(email);
+        });
+        item.appendChild(open);
         list.appendChild(item);
     }
     return list;

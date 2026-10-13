@@ -35,6 +35,8 @@ function loadConfig(env = process.env) {
         smtpUsername: env.SMTP_USERNAME || '',
         smtpPassword: env.SMTP_PASSWORD || '',
         maxEmailBytes: toInt(env.MAX_EMAIL_SIZE_MB, 10) * 1024 * 1024,
+        // Lets an admin check an email's links from the dashboard (the server then requests those URLs)
+        linkCheck: env.LINK_CHECK !== 'false',
         // POSTed to for every stored email (see src/mail/webhook.js); signed when a secret is set
         webhookUrl: (env.WEBHOOK_URL || '').trim(),
         webhookSecret: env.WEBHOOK_SECRET || '',
