@@ -6,7 +6,7 @@ Built with Node.js and Express, using [`smtp-server`](https://github.com/nodemai
 
 ## Features
 
-- **SMTP server** that accepts every message from anyone to anyone and never relays it. Optional login (`SMTP_USERNAME` / `SMTP_PASSWORD`).
+- **SMTP server** that accepts every message from anyone to anyone. Optional login (`SMTP_USERNAME` / `SMTP_PASSWORD`), optional TLS (STARTTLS and a TLS-only port), an optional list of accepted domains, special recipients that [simulate delivery failures](#simulating-delivery-failures), and an optional, allowlisted [relay](#relaying-to-a-real-mail-server) to a real mail server.
 - **Full MIME parsing**: text and HTML bodies, multipart messages, encoded headers and names, inline images, attachments, and the raw `.eml`. Bcc recipients are recorded from the SMTP envelope.
 - **Web dashboard** with a resizable sidebar and a resizable detail pane:
   - **Emails**: list with search (subject, addresses, body), date filters, quick time ranges, pagination, bulk delete and keyboard navigation (↑/↓ or j/k).
@@ -40,7 +40,8 @@ email-test-service
 │   ├── server.js                 # Builds the Express app (middleware, routes)
 │   ├── config.js                 # Reads and validates environment variables
 │   ├── mail
-│   │   ├── smtpServer.js         # smtp-server: accepts mail, optional login, size limit
+│   │   ├── smtpServer.js         # smtp-server: accepts mail, login, TLS, allowed domains, failure simulation
+│   │   ├── relay.js              # Optional forwarding of allowlisted recipients to a real mail server
 │   │   ├── ingest.js             # Raw message in, stored email out (SMTP and "Send test")
 │   │   ├── events.js             # Wakes up requests waiting in /api/emails/wait
 │   │   ├── webhook.js            # POSTs each received email to WEBHOOK_URL
@@ -52,7 +53,7 @@ email-test-service
 │   ├── models                    # emailModel.js, apiKeyModel.js
 │   ├── middleware                # auth.js (sessions, keys, ADMIN_TOKEN), validate.js
 │   ├── database                  # SQLite (node:sqlite), PostgreSQL, MySQL
-│   ├── utils                     # otp.js, links.js, apiKeys.js, session.js, logger.js, time.js
+│   ├── utils                     # otp.js, links.js, recipients.js, apiKeys.js, session.js, logger.js, time.js
 │   └── views                     # Dashboard (static files)
 ├── client                        # Zero-dependency helper for E2E tests (index.js + index.d.ts)
 ├── test                          # node:test suites (npm test)
@@ -85,7 +86,7 @@ Run the tests with `npm test`.
 
 ## Pointing your application at it
 
-Use plain SMTP: **no TLS and no STARTTLS**. The server has no certificate, and clients that are offered TLS would reject a self-signed one, so STARTTLS is not advertised.
+By default use plain SMTP: **no TLS and no STARTTLS**. The server has no certificate, and clients that are offered TLS would reject a self-signed one, so STARTTLS is not advertised. To test an app that requires TLS, see [TLS](#tls).
 
 ```js
 // Nodemailer
@@ -101,7 +102,7 @@ SMTP_SECURE=false
 | | |
 |---|---|
 | **Login** | None needed: any credentials (or none) are accepted. Set `SMTP_USERNAME` and `SMTP_PASSWORD` to require them. |
-| **Recipients** | Everything is accepted, including addresses that don't exist. |
+| **Recipients** | Everything is accepted, including addresses that don't exist, unless you set `SMTP_ALLOWED_DOMAINS`. A few special names fail on purpose: see [Simulating delivery failures](#simulating-delivery-failures). |
 | **Size** | Messages over `MAX_EMAIL_SIZE_MB` (10 by default) are rejected with `552`. |
 
 Try it without an application:
@@ -110,6 +111,57 @@ Try it without an application:
 swaks --server localhost:1025 --from noreply@example.com --to user@example.com \
   --header 'Subject: Hello' --body 'Your verification code is 123456'
 ```
+
+## SMTP behavior
+
+### Simulating delivery failures
+
+Send to one of these recipients to see how your application handles a refusal. Only the part of the address before the `@` matters, and a suffix after `+`, `.`, `_` or `-` is ignored (`reject+signup@example.com` works too). Ordinary addresses such as `rejected@`, `fullname@` or `slowpoke@` are never affected.
+
+| Recipient | What the server does |
+|-----------|----------------------|
+| `reject@…` | Refuses it with `550` mailbox unavailable (a permanent failure) |
+| `tempfail@…` | Refuses it with `451` temporary failure (the client should retry) |
+| `full@…` | Refuses it with `452` mailbox full |
+| `slow@…`, `slow10@…` | Accepts it after 5 seconds, or after the number of seconds in the name (at most 30) |
+| `datafail@…` | Accepts the recipient, then refuses the message with `554` after the body is sent; nothing is stored |
+
+Other recipients on the same message are still accepted, as with a real server (the refused one is reported per recipient). Set `SMTP_SIMULATE=false` to turn this off.
+
+### Accepting only some domains
+
+`SMTP_ALLOWED_DOMAINS=example.com,*.staging.test` makes the server refuse every other recipient with `550 Relay access denied`, which catches a mistyped address or a wrong environment in an app's config. `example.com` matches that domain only; `*.staging.test` matches its subdomains (not `staging.test` itself). Empty (the default) accepts everything.
+
+### TLS
+
+Set `SMTP_TLS_KEY` and `SMTP_TLS_CERT` (paths to PEM files) and the server offers **STARTTLS** on `SMTP_PORT`; plain connections still work. Set `SMTP_TLS_PORT` as well (for example `1465`) to add a second listener that is encrypted from the first byte (implicit TLS, like port 465). Use it for apps that require TLS:
+
+```
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=localhost" -keyout key.pem -out cert.pem
+```
+
+```js
+// STARTTLS on SMTP_PORT, or secure: true with SMTP_TLS_PORT. A self-signed certificate needs rejectUnauthorized: false.
+nodemailer.createTransport({ host: 'localhost', port: 1025, secure: false, requireTLS: true, tls: { rejectUnauthorized: false } });
+```
+
+In Docker, mount the files and point the variables at them (for example `-v ./certs:/certs:ro` with `SMTP_TLS_KEY=/certs/key.pem`), and publish the TLS port.
+
+### Relaying to a real mail server
+
+Off by default. Set `RELAY_HOST` (plus `RELAY_PORT`, default `587`, `RELAY_SECURE=true` for a TLS-only port, and `RELAY_USER` / `RELAY_PASSWORD`) and the service **also forwards** each message to a real mail server, but only to the recipients on `RELAY_ALLOW`, for example to check how a template looks in a real inbox:
+
+```
+RELAY_HOST=smtp.example.net
+RELAY_USER=me
+RELAY_PASSWORD=...
+RELAY_ALLOW=me@example.com,@mycompany.com
+RELAY_FROM=testing@mycompany.com
+```
+
+- `RELAY_ALLOW` is required whenever `RELAY_HOST` is set, so the service can never become an open relay. Entries are addresses, domains (`mycompany.com`) or subdomain wildcards (`*.mycompany.com`). Recipients not on the list are stored but never forwarded.
+- `RELAY_FROM` replaces the envelope sender, which many providers require to be an address you own. The message itself is forwarded unchanged.
+- The email is always stored; relaying is best effort. A relay that is down or refuses the message is logged and doesn't affect receiving mail. Messages added with **Send test** are relayed the same way.
 
 ## Authentication
 
@@ -311,6 +363,15 @@ See `sample.env` for a commented template.
 | `SMTP_HOST` | `0.0.0.0` | Interface the SMTP server listens on |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | — | Optional. Set both to require SMTP login |
 | `MAX_EMAIL_SIZE_MB` | `10` | Largest accepted message |
+| `SMTP_SIMULATE` | `true` | `false` turns off the special failure recipients (`reject@` and so on) |
+| `SMTP_ALLOWED_DOMAINS` | — | Comma separated domains (`example.com`, `*.example.com`) the server accepts mail for; empty accepts everything |
+| `SMTP_TLS_KEY`, `SMTP_TLS_CERT` | — | PEM files; set both to offer STARTTLS |
+| `SMTP_TLS_PORT` | — | Optional second SMTP port that is TLS from the first byte (needs the key and certificate) |
+| `RELAY_HOST`, `RELAY_PORT` | —, `587` | Real mail server to forward allowlisted recipients to |
+| `RELAY_SECURE` | `false` | `true` for a TLS-only relay port (465) |
+| `RELAY_USER`, `RELAY_PASSWORD` | — | Relay login (set both or neither) |
+| `RELAY_FROM` | — | Envelope sender used when relaying |
+| `RELAY_ALLOW` | — | Required with `RELAY_HOST`: addresses, domains or `*.domains` that may be forwarded |
 | `LINK_CHECK` | `true` | `false` turns off the dashboard's link checker (the server requesting the email's links) |
 | `WEBHOOK_URL` | — | Optional. POSTed to for every stored email (see [Webhook](#webhook)) |
 | `WEBHOOK_SECRET` | — | Optional. Signs webhook requests (`X-Signature-256`) |

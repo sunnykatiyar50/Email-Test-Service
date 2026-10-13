@@ -28,9 +28,13 @@ services:
       - "${PORT:-30004}:${PORT:-30004}"
       # SMTP: where your apps send mail (SMTP_PORT from .env, 1025 if unset)
       - "${SMTP_PORT:-1025}:${SMTP_PORT:-1025}"
+      # SMTP over TLS from the first byte: publish it when SMTP_TLS_PORT is set in .env
+      # - "${SMTP_TLS_PORT:-1465}:${SMTP_TLS_PORT:-1465}"
     volumes:
       - email-data:/app/data
       - email-logs:/app/logs
+      # Certificate for STARTTLS / SMTP_TLS_PORT (set SMTP_TLS_KEY=/certs/key.pem and SMTP_TLS_CERT=/certs/cert.pem)
+      # - ./certs:/certs:ro
       # Or bind mounts to host folders. They must be writable by UID 1000:
       #   sudo mkdir -p ./data ./logs && sudo chown -R 1000:1000 ./data ./logs
       # - ./data:/app/data

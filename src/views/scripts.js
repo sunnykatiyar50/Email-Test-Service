@@ -907,7 +907,15 @@ const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 const TEST_FIELDS = ['from', 'to', 'subject', 'text', 'html'];
 
 // The server's SMTP address as seen from this page, filled in from /api/info
-let smtpInfo = { smtpPort: 1025, smtpAuthRequired: false, smtpUsername: null };
+let smtpInfo = {
+    smtpPort: 1025,
+    smtpAuthRequired: false,
+    smtpUsername: null,
+    smtpStartTls: false,
+    smtpTlsPort: null,
+    smtpSimulate: true,
+    smtpAllowedDomains: [],
+};
 
 async function loadServerInfo() {
     try {
@@ -1256,6 +1264,13 @@ function renderApiReference() {
     $('smtpAuthNote').textContent = smtpInfo.smtpAuthRequired
         ? `Login required${smtpInfo.smtpUsername ? ` (user "${smtpInfo.smtpUsername}", password from SMTP_PASSWORD in .env)` : ''}`
         : 'No login needed (any credentials are accepted)';
+    $('smtpEncryptionNote').textContent = smtpInfo.smtpStartTls
+        ? `STARTTLS is available on this port${smtpInfo.smtpTlsPort ? `, and TLS from the first byte on port ${smtpInfo.smtpTlsPort}` : ''}. With a self-signed certificate your client must skip verification (Nodemailer: tls: { rejectUnauthorized: false }). Plain SMTP works too.`
+        : 'None. Use plain SMTP: secure: false and no STARTTLS (for Nodemailer, ignoreTLS: true). Set SMTP_TLS_KEY and SMTP_TLS_CERT on the server to offer TLS.';
+    $('smtpRecipientsNote').textContent = smtpInfo.smtpAllowedDomains.length
+        ? `Only mail for ${smtpInfo.smtpAllowedDomains.join(', ')}; any other recipient is refused with 550 (SMTP_ALLOWED_DOMAINS). Bcc recipients are recorded too (see "Also to")`
+        : 'Any address is accepted, including ones that don\'t exist. Bcc recipients are recorded too (see "Also to")';
+    $('simulateCard').classList.toggle('hidden', !smtpInfo.smtpSimulate);
     $('nodemailerExample').textContent = [
         "const nodemailer = require('nodemailer');",
         '',
@@ -1263,7 +1278,7 @@ function renderApiReference() {
         `  host: '${host}',`,
         `  port: ${port},`,
         '  secure: false,',
-        '  ignoreTLS: true,',
+        ...(smtpInfo.smtpStartTls ? ['  tls: { rejectUnauthorized: false }, // self-signed certificate'] : ['  ignoreTLS: true,']),
         ...(smtpInfo.smtpAuthRequired ? ["  auth: { user: process.env.SMTP_USERNAME, pass: process.env.SMTP_PASSWORD },"] : []),
         '});',
         "await transport.sendMail({ from: 'noreply@example.com', to: 'user@example.com', subject: 'Hello', text: 'Your code is 123456' });",

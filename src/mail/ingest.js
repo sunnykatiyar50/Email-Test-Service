@@ -4,8 +4,8 @@ const { logToFile } = require('../utils/logger');
 
 // The one way mail enters the system: raw message bytes in, stored email id out.
 // Used by the SMTP server and by the dashboard's "Send test" form. After storing, it wakes requests waiting
-// in GET /api/emails/wait (events) and calls the webhook, if one is configured.
-function createIngest({ emailModel, events = null, webhook = null }) {
+// in GET /api/emails/wait (events), calls the webhook, and forwards to the relay, if those are configured.
+function createIngest({ emailModel, events = null, webhook = null, relay = null }) {
     return async function ingest(raw, options) {
         const record = await parseEmail(raw, options);
         const { id, timestamp } = await emailModel.create(record);
@@ -20,6 +20,8 @@ function createIngest({ emailModel, events = null, webhook = null }) {
                 })
                 .catch(error => logToFile(`Webhook preparation failed for email id=${id}: ${error.message}`));
         }
+        // Forwards to the allowlisted recipients, if a relay is configured. Not awaited, like the webhook.
+        if (relay) relay(id, raw, options && options.envelope).catch(error => logToFile(`Relay failed for email id=${id}: ${error.message}`));
         return { id, timestamp, size: record.size, recipients: record.envelopeTo.length || record.to.length };
     };
 }

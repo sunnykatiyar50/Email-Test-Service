@@ -67,6 +67,10 @@ function createApp({ config, emailModel, apiKeyModel, ingest, events }) {
         res.json({
             smtpPort: config.smtpPort,
             smtpAuthRequired: Boolean(config.smtpUsername),
+            smtpStartTls: Boolean(config.smtpTlsKey),
+            smtpTlsPort: config.smtpTlsPort || null,
+            smtpSimulate: config.smtpSimulate,
+            smtpAllowedDomains: config.smtpAllowedDomains.map(rule => (rule.type === 'subdomains' ? `*.${rule.value}` : rule.value)),
             smtpUsername: req.auth.isAdmin ? config.smtpUsername || null : null,
         });
     });

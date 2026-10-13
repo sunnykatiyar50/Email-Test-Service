@@ -291,8 +291,8 @@
                     </div>
                     <table class="ref-table">
                         <tr><th>Login</th><td id="smtpAuthNote"></td></tr>
-                        <tr><th>Encryption</th><td>None. Use plain SMTP: <code>secure: false</code> and no STARTTLS (for Nodemailer, <code>ignoreTLS: true</code>)</td></tr>
-                        <tr><th>Recipients</th><td>Any address is accepted, including ones that don't exist. Bcc recipients are recorded too (see "Also to")</td></tr>
+                        <tr><th>Encryption</th><td id="smtpEncryptionNote"></td></tr>
+                        <tr><th>Recipients</th><td id="smtpRecipientsNote"></td></tr>
                         <tr><th>Size</th><td>Messages over <code>MAX_EMAIL_SIZE_MB</code> (10 MB by default) are rejected with <code>552</code></td></tr>
                     </table>
 
@@ -307,6 +307,19 @@
                         <button type="button" class="copy-button" data-copy="nodemailerExample">Copy</button>
                     </div>
                     <pre class="code" id="nodemailerExample"></pre>
+                </article>
+
+                <article id="simulateCard" class="card">
+                    <h3>Simulate delivery failures</h3>
+                    <p class="hint">Send to one of these special recipients to see how your app handles a refusal. The part after <code>+</code> (or <code>.</code>, <code>_</code>, <code>-</code>) is ignored, so <code>reject+signup@example.com</code> works too. Turn this off with <code>SMTP_SIMULATE=false</code>.</p>
+                    <table class="ref-table">
+                        <tr><th><code>reject@</code></th><td><code>550</code> mailbox unavailable (permanent failure)</td></tr>
+                        <tr><th><code>tempfail@</code></th><td><code>451</code> temporary failure, try again later</td></tr>
+                        <tr><th><code>full@</code></th><td><code>452</code> mailbox full</td></tr>
+                        <tr><th><code>slow@</code></th><td>Accepted after 5 seconds. <code>slow10@</code> waits 10 seconds (at most 30)</td></tr>
+                        <tr><th><code>datafail@</code></th><td>The recipient is accepted, then the message is refused with <code>554</code> and not stored</td></tr>
+                    </table>
+                    <p class="hint">Other recipients on the same message are still accepted, as with a real server.</p>
                 </article>
 
                 <article class="card">

@@ -8,6 +8,7 @@ const { createApp } = require('./server');
 const { createIngest } = require('./mail/ingest');
 const { createEvents } = require('./mail/events');
 const { createWebhook } = require('./mail/webhook');
+const { createRelay } = require('./mail/relay');
 const { createSmtpServer, listen: listenSmtp } = require('./mail/smtpServer');
 const { logToFile } = require('./utils/logger');
 
@@ -47,7 +48,9 @@ async function main() {
     const events = createEvents();
     const webhook = createWebhook({ url: config.webhookUrl, secret: config.webhookSecret });
     if (webhook) logToFile(`Webhook enabled: new emails are POSTed to ${new URL(config.webhookUrl).host}`);
-    const ingest = createIngest({ emailModel, events, webhook });
+    const relay = createRelay(config);
+    if (relay) logToFile(`Relay enabled: mail for ${config.relayAllow.length} allowed recipient rule(s) is forwarded via ${config.relayHost}`);
+    const ingest = createIngest({ emailModel, events, webhook, relay });
     const app = createApp({ config, emailModel, apiKeyModel, ingest, events });
     const server = app.listen(config.port, () => {
         logToFile(`Dashboard and API are running on http://localhost:${config.port}`);
@@ -55,17 +58,26 @@ async function main() {
 
     const smtp = createSmtpServer({ config, ingest });
     const smtpPort = await listenSmtp(smtp, { port: config.smtpPort, host: config.smtpHost });
+    const tlsNote = config.smtpTlsKey ? ', STARTTLS available' : '';
     logToFile(
         `SMTP server is listening on ${config.smtpHost}:${smtpPort} ` +
-        (config.smtpUsername ? '(login required)' : '(any or no login accepted)')
+        `(${config.smtpUsername ? 'login required' : 'any or no login accepted'}${tlsNote})`
     );
+    const smtpServers = [smtp];
+    if (config.smtpTlsPort) {
+        const smtpTls = createSmtpServer({ config, ingest, secure: true });
+        const tlsPort = await listenSmtp(smtpTls, { port: config.smtpTlsPort, host: config.smtpHost });
+        logToFile(`SMTP over TLS is listening on ${config.smtpHost}:${tlsPort}`);
+        smtpServers.push(smtpTls);
+    }
+    if (config.smtpAllowedDomains.length) logToFile(`SMTP accepts mail only for ${config.smtpAllowedDomains.length} allowed domain rule(s)`);
 
-    handleShutdown({ server, smtp, db });
+    handleShutdown({ server, smtpServers, db });
 }
 
 // Stop accepting connections, let in-flight requests finish, then close the database.
 // Without this, `docker stop` waits its full timeout and then kills the process.
-function handleShutdown({ server, smtp, db }) {
+function handleShutdown({ server, smtpServers, db }) {
     let shuttingDown = false;
     const shutdown = signal => {
         if (shuttingDown) return;
@@ -75,10 +87,9 @@ function handleShutdown({ server, smtp, db }) {
             logToFile('Shutdown timed out, exiting');
             process.exit(1);
         }, 8000).unref();
-        const closeSmtp = new Promise(resolve => smtp.close(resolve));
-        const closeHttp = new Promise(resolve => server.close(resolve));
+        const closing = [...smtpServers.map(smtp => new Promise(resolve => smtp.close(resolve))), new Promise(resolve => server.close(resolve))];
         server.closeIdleConnections();
-        Promise.all([closeSmtp, closeHttp]).then(async () => {
+        Promise.all(closing).then(async () => {
             try {
                 await db.close();
             } catch (error) {

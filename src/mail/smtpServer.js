@@ -1,18 +1,65 @@
+const fs = require('fs');
 const { SMTPServer } = require('smtp-server');
 const { safeEqual } = require('../utils/session');
+const { matchesAny, describeRule } = require('../utils/recipients');
 const { logToFile } = require('../utils/logger');
 
-// Accepts every message, from anyone to anyone, and stores it. Nothing is ever relayed.
-// STARTTLS is not offered: the server has no certificate, and clients that are told TLS is available
-// would reject the self-signed one. Point your app at it with TLS off (secure: false, ignoreTLS: true).
-function createSmtpServer({ config, ingest }) {
+// Accepts every message, from anyone to anyone, and stores it. Nothing is relayed unless the optional relay
+// is configured (see relay.js).
+//
+// TLS is optional. Without SMTP_TLS_KEY / SMTP_TLS_CERT the server has no certificate, so STARTTLS is not
+// offered (clients told TLS is available would reject a self-signed one); point your app at it with TLS off.
+// With them, STARTTLS is offered, and SMTP_TLS_PORT adds a second listener that is TLS from the first byte.
+
+// Special recipients that make delivery fail on purpose, to test how an app handles it. The local part
+// (before any +tag) picks the behaviour: reject@, tempfail@, full@, slow@ / slow10@, datafail@.
+const SIMULATIONS = /^(reject|tempfail|full|slow|datafail)(\d*)(?:[+._-].*)?$/;
+const DEFAULT_SLOW_SECONDS = 5;
+const MAX_SLOW_SECONDS = 30;
+
+function failure(code, message) {
+    const error = new Error(message);
+    error.responseCode = code;
+    return error;
+}
+
+// What to do with a recipient: { error } to refuse it, { delay } (ms) to answer late, { dataFail: true } to
+// accept it but fail the message at DATA, or {} for a normal recipient
+function simulate(address) {
+    const local = String(address || '').split('@')[0].toLowerCase();
+    const match = SIMULATIONS.exec(local);
+    if (!match) return {};
+    switch (match[1]) {
+        case 'reject':
+            return { error: failure(550, 'Mailbox unavailable (simulated)') };
+        case 'tempfail':
+            return { error: failure(451, 'Temporary failure, try again later (simulated)') };
+        case 'full':
+            return { error: failure(452, 'Mailbox full (simulated)') };
+        case 'datafail':
+            return { dataFail: true };
+        default: {
+            const seconds = match[2] ? Math.min(Number(match[2]), MAX_SLOW_SECONDS) : DEFAULT_SLOW_SECONDS;
+            return { delay: seconds * 1000 };
+        }
+    }
+}
+
+// secure: TLS from the first byte (the SMTP_TLS_PORT listener); otherwise plain, with STARTTLS if there is a certificate
+function createSmtpServer({ config, ingest, secure = false }) {
     const authRequired = Boolean(config.smtpUsername);
+    const tls = config.smtpTlsKey && config.smtpTlsCert
+        ? { key: fs.readFileSync(config.smtpTlsKey), cert: fs.readFileSync(config.smtpTlsCert) }
+        : null;
+    if (secure && !tls) throw new Error('A TLS listener needs SMTP_TLS_KEY and SMTP_TLS_CERT');
 
     const server = new SMTPServer({
         banner: 'Email Test Service',
         authOptional: !authRequired,
         allowInsecureAuth: true,
-        disabledCommands: ['STARTTLS'],
+        secure,
+        ...tls,
+        disabledCommands: tls ? [] : ['STARTTLS'],
         size: config.maxEmailBytes,
         logger: false,
 
@@ -26,6 +73,20 @@ function createSmtpServer({ config, ingest }) {
             callback(new Error('Invalid username or password'));
         },
 
+        onRcptTo(address, session, callback) {
+            // Only mail for the listed domains, so a mistyped address in an app's config is caught
+            if (config.smtpAllowedDomains.length && !matchesAny(config.smtpAllowedDomains, address.address)) {
+                const allowed = config.smtpAllowedDomains.map(describeRule).join(', ');
+                return callback(failure(550, `Relay access denied: this server only accepts mail for ${allowed}`));
+            }
+            if (!config.smtpSimulate) return callback();
+            const { error, delay, dataFail } = simulate(address.address);
+            if (error) return callback(error);
+            if (dataFail) session.simulateDataFailure = true;
+            if (delay) return setTimeout(callback, delay);
+            callback();
+        },
+
         onData(stream, session, callback) {
             const chunks = [];
             stream.on('data', chunk => chunks.push(chunk));
@@ -36,6 +97,7 @@ function createSmtpServer({ config, ingest }) {
                     error.responseCode = 552;
                     return callback(error);
                 }
+                if (session.simulateDataFailure) return callback(failure(554, 'Transaction failed (simulated)'));
                 try {
                     const { id, size, recipients } = await ingest(Buffer.concat(chunks), {
                         envelope: session.envelope,
@@ -46,9 +108,7 @@ function createSmtpServer({ config, ingest }) {
                     callback();
                 } catch (error) {
                     logToFile(`Failed to store email: ${error.stack || error}`);
-                    const failure = new Error('Could not store the message, try again');
-                    failure.responseCode = 451;
-                    callback(failure);
+                    callback(failure(451, 'Could not store the message, try again'));
                 }
             });
         },
@@ -69,4 +129,4 @@ function listen(server, { port, host }) {
     });
 }
 
-module.exports = { createSmtpServer, listen };
+module.exports = { createSmtpServer, listen, simulate };

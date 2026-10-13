@@ -1,6 +1,9 @@
 // Reads and validates configuration from environment variables.
 // Throws on invalid auth configuration so the server never starts unprotected by accident.
 
+const fs = require('fs');
+const { parseRules } = require('./utils/recipients');
+
 // VIEWER_USERS=alice:password1,bob:password2 -> [{ username, password }]
 // (passwords can contain ':' but not ',')
 function parseUsers(raw) {
@@ -15,6 +18,16 @@ function parseUsers(raw) {
                 ? { username: entry, password: '' }
                 : { username: entry.slice(0, sep).trim(), password: entry.slice(sep + 1) };
         });
+}
+
+// A comma separated list of recipient rules (see utils/recipients.js); problems are added to `problems`
+function ruleList(name, value, problems) {
+    try {
+        return parseRules(value);
+    } catch (error) {
+        problems.push(`${name}: ${error.message}`);
+        return [];
+    }
 }
 
 const USERNAME_RE = /^[A-Za-z0-9._@-]{1,64}$/;
@@ -35,6 +48,21 @@ function loadConfig(env = process.env) {
         smtpUsername: env.SMTP_USERNAME || '',
         smtpPassword: env.SMTP_PASSWORD || '',
         maxEmailBytes: toInt(env.MAX_EMAIL_SIZE_MB, 10) * 1024 * 1024,
+        // Failures on purpose for special recipients (reject@, tempfail@, full@, slow@, datafail@)
+        smtpSimulate: env.SMTP_SIMULATE !== 'false',
+        smtpAllowedDomains: [], // filled in below
+        // STARTTLS on SMTP_PORT, and optionally a second listener that is TLS from the first byte
+        smtpTlsKey: (env.SMTP_TLS_KEY || '').trim(),
+        smtpTlsCert: (env.SMTP_TLS_CERT || '').trim(),
+        smtpTlsPort: toInt(env.SMTP_TLS_PORT, 0),
+        // Optional relay of mail for allowlisted recipients to a real mail server (see mail/relay.js)
+        relayHost: (env.RELAY_HOST || '').trim(),
+        relayPort: toInt(env.RELAY_PORT, 587),
+        relaySecure: env.RELAY_SECURE === 'true',
+        relayUser: env.RELAY_USER || '',
+        relayPassword: env.RELAY_PASSWORD || '',
+        relayFrom: (env.RELAY_FROM || '').trim(),
+        relayAllow: [], // filled in below
         // Lets an admin check an email's links from the dashboard (the server then requests those URLs)
         linkCheck: env.LINK_CHECK !== 'false',
         // POSTed to for every stored email (see src/mail/webhook.js); signed when a secret is set
@@ -55,6 +83,21 @@ function loadConfig(env = process.env) {
     if (config.webhookUrl && !/^https?:\/\/[^\s/]+/i.test(config.webhookUrl)) {
         throw new Error('WEBHOOK_URL must be an http:// or https:// URL');
     }
+
+    const setup = [];
+    config.smtpAllowedDomains = ruleList('SMTP_ALLOWED_DOMAINS', env.SMTP_ALLOWED_DOMAINS, setup);
+    config.relayAllow = ruleList('RELAY_ALLOW', env.RELAY_ALLOW, setup);
+    if (Boolean(config.smtpTlsKey) !== Boolean(config.smtpTlsCert)) setup.push('SMTP_TLS_KEY and SMTP_TLS_CERT must be set together');
+    for (const [name, file] of [['SMTP_TLS_KEY', config.smtpTlsKey], ['SMTP_TLS_CERT', config.smtpTlsCert]]) {
+        if (file && !fs.existsSync(file)) setup.push(`${name}: the file "${file}" does not exist`);
+    }
+    if (config.smtpTlsPort && !config.smtpTlsKey) setup.push('SMTP_TLS_PORT needs SMTP_TLS_KEY and SMTP_TLS_CERT');
+    if (config.smtpTlsPort && config.smtpTlsPort === config.smtpPort) setup.push('SMTP_TLS_PORT must differ from SMTP_PORT');
+    if (config.relayHost && config.relayAllow.length === 0) {
+        setup.push('RELAY_HOST needs RELAY_ALLOW: the recipients (addresses or domains) that may be forwarded to a real mail server');
+    }
+    if (Boolean(config.relayUser) !== Boolean(config.relayPassword)) setup.push('RELAY_USER and RELAY_PASSWORD must be set together');
+    if (setup.length) throw new Error(`Invalid configuration: ${setup.join('; ')}.`);
 
     if (!config.authDisabled) {
         const problems = [];
