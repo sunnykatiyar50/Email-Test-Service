@@ -7,6 +7,11 @@ const MAX_WAIT_SECONDS = 120;
 const MAX_RECIPIENTS = 20;
 const MAX_SUBJECT = 255;
 const MAX_BODY = 200000;
+const MAX_ATTACHMENTS = 5;
+const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+const MAX_ATTACHMENTS_TOTAL_BYTES = 5 * 1024 * 1024;
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+const MEDIA_TYPE = /^[\w.+-]+\/[\w.+-]+$/;
 const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -97,6 +102,18 @@ function validateIdParam(req, res, next) {
     next();
 }
 
+// GET /api/emails/export?ids=1,2,3
+const MAX_EXPORT = 100;
+function validateExportQuery(req, res, next) {
+    const raw = typeof req.query.ids === 'string' ? req.query.ids.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const ids = raw.map(parseId);
+    if (raw.length === 0 || raw.length > MAX_EXPORT || ids.includes(null)) {
+        return badRequest(res, { ids: `must be 1-${MAX_EXPORT} email ids separated by commas` });
+    }
+    req.validated = { ids: [...new Set(ids)] };
+    next();
+}
+
 function validateAttachmentParams(req, res, next) {
     const id = parseId(req.params.id);
     const attachmentId = parseId(req.params.attachmentId);
@@ -128,7 +145,35 @@ function validateBulkDelete(req, res, next) {
     });
 }
 
-// The dashboard's "Send test" form: from, to (comma separated), subject, text and/or html
+// "a@x.com, b@x.com" -> ['a@x.com', 'b@x.com'] (duplicates removed)
+const addressList = value => [...new Set((typeof value === 'string' ? value : '').split(/[,;\s]+/).map(a => a.trim()).filter(Boolean))];
+const validAddresses = list => list.length <= MAX_RECIPIENTS && list.every(a => EMAIL_RE.test(a));
+
+// Attachments arrive as [{ filename, contentType?, content: base64 }]; returns { attachments } or { error }
+function parseAttachments(value) {
+    if (value === undefined || value === null) return { attachments: [] };
+    if (!Array.isArray(value) || value.length > MAX_ATTACHMENTS) return { error: `must be a list of at most ${MAX_ATTACHMENTS} files` };
+    const attachments = [];
+    let total = 0;
+    for (const item of value) {
+        const filename = item && typeof item.filename === 'string' ? item.filename.trim() : '';
+        // No path separators or control characters: the name ends up in message headers
+        if (!filename || filename.length > 255 || /[\\/\u0000-\u001f\u007f]/.test(filename)) {
+            return { error: 'every file needs a name of at most 255 characters, without slashes or control characters' };
+        }
+        const encoded = item && typeof item.content === 'string' ? item.content.replace(/\s+/g, '') : null;
+        if (encoded === null || !BASE64.test(encoded)) return { error: `"${filename}" must be sent as base64` };
+        const content = Buffer.from(encoded, 'base64');
+        if (content.length > MAX_ATTACHMENT_BYTES) return { error: `"${filename}" is larger than ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB` };
+        total += content.length;
+        const contentType = typeof item.contentType === 'string' && MEDIA_TYPE.test(item.contentType) ? item.contentType : 'application/octet-stream';
+        attachments.push({ filename, contentType, content });
+    }
+    if (total > MAX_ATTACHMENTS_TOTAL_BYTES) return { error: `the files together are larger than ${MAX_ATTACHMENTS_TOTAL_BYTES / 1024 / 1024} MB` };
+    return { attachments };
+}
+
+// The dashboard's "Send test" form: from, to / cc / bcc (comma separated), subject, text and/or html, attachments
 function validateTestEmail(req, res, next) {
     const body = req.body && typeof req.body === 'object' ? req.body : {};
     const errors = {};
@@ -142,21 +187,23 @@ function validateTestEmail(req, res, next) {
     // Control characters would let a value inject extra headers
     if (fromName.length > 64 || /[\r\n"<>]/.test(fromName)) errors.fromName = 'must be at most 64 characters, without quotes, < > or line breaks';
 
-    const to = (typeof body.to === 'string' ? body.to : '')
-        .split(/[,;\s]+/)
-        .map(s => s.trim())
-        .filter(Boolean);
-    if (to.length === 0 || to.length > MAX_RECIPIENTS || !to.every(a => EMAIL_RE.test(a))) {
-        errors.to = `must be 1-${MAX_RECIPIENTS} email addresses separated by commas`;
-    }
+    const to = addressList(body.to);
+    const cc = addressList(body.cc);
+    const bcc = addressList(body.bcc);
+    if (to.length === 0 || !validAddresses(to)) errors.to = `must be 1-${MAX_RECIPIENTS} email addresses separated by commas`;
+    if (!validAddresses(cc)) errors.cc = `must be at most ${MAX_RECIPIENTS} email addresses separated by commas`;
+    if (!validAddresses(bcc)) errors.bcc = `must be at most ${MAX_RECIPIENTS} email addresses separated by commas`;
 
     if (subject.length > MAX_SUBJECT || /[\r\n]/.test(subject)) errors.subject = `must be one line of at most ${MAX_SUBJECT} characters`;
     if (!text.trim() && !html.trim()) errors.text = 'or html is required';
     if (text.length > MAX_BODY) errors.text = `must be at most ${MAX_BODY} characters`;
     if (html.length > MAX_BODY) errors.html = `must be at most ${MAX_BODY} characters`;
 
+    const { attachments, error } = parseAttachments(body.attachments);
+    if (error) errors.attachments = error;
+
     if (Object.keys(errors).length) return badRequest(res, errors);
-    req.validated = { from, fromName, to: [...new Set(to)], subject, text, html };
+    req.validated = { from, fromName, to, cc, bcc, subject, text, html, attachments };
     next();
 }
 
@@ -166,5 +213,6 @@ module.exports = {
     validateIdList,
     validateBulkDelete,
     validateAttachmentParams,
+    validateExportQuery,
     validateTestEmail,
 };

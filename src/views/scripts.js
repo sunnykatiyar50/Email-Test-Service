@@ -256,6 +256,38 @@ async function logout() {
     }
 }
 
+// --- Live updates ---
+
+// Emails that just arrived over the live stream; their rows flash once when the list reloads
+const freshIds = new Set();
+let liveSource = null;
+let liveTimer = 0;
+
+// The server pushes an event for every stored email (GET /api/emails/stream). A burst of mail is
+// collapsed into one reload of the list.
+function startLiveUpdates() {
+    if (typeof EventSource === 'undefined' || liveSource) return;
+    liveSource = new EventSource('/api/emails/stream');
+    liveSource.addEventListener('open', () => $('liveStatus').classList.remove('hidden'));
+    liveSource.addEventListener('error', () => {
+        $('liveStatus').classList.add('hidden');
+        // CLOSED: the server refused the stream (signed out, or too many connections); the browser doesn't retry
+        if (liveSource && liveSource.readyState === EventSource.CLOSED) liveSource = null;
+    });
+    liveSource.addEventListener('email', event => {
+        try {
+            freshIds.add(JSON.parse(event.data).id);
+        } catch {
+            // an unreadable event still triggers the reload
+        }
+        clearTimeout(liveTimer);
+        liveTimer = setTimeout(() => {
+            if (currentView() === 'messages') reloadCurrentPage();
+            else $('navCount').textContent = String((Number($('navCount').textContent) || 0) + freshIds.size);
+        }, 250);
+    });
+}
+
 // --- Emails: loading and rendering ---
 
 function currentFilters() {
@@ -326,7 +358,7 @@ function renderMessages() {
     if (!messages.some(m => m.id === selectedId)) selectedId = messages[0].id;
 
     for (const msg of messages) {
-        const li = el('li', 'message-row');
+        const li = el('li', freshIds.has(msg.id) ? 'message-row fresh' : 'message-row');
         li.dataset.id = String(msg.id);
         if (msg.id === selectedId) li.classList.add('selected');
         li.addEventListener('click', event => {
@@ -365,6 +397,7 @@ function renderMessages() {
         li.appendChild(body);
         list.appendChild(li);
     }
+    freshIds.clear();
     showDetails(messages.find(m => m.id === selectedId));
 }
 
@@ -875,12 +908,34 @@ function updateSelectionInfo() {
     const count = selectedIds().length;
     $('selectionInfo').textContent = count ? `${count} selected` : '';
     $('deleteSelectedButton').disabled = count === 0;
+    $('exportSelectedButton').disabled = count === 0;
     $('selectAllCheckbox').checked = count > 0 && count === messages.length;
 }
 
 function toggleSelectAll(checked) {
     document.querySelectorAll('.message-checkbox').forEach(c => (c.checked = checked));
     updateSelectionInfo();
+}
+
+// Downloads the selected emails as a zip of .eml files
+async function exportSelectedMessages() {
+    const ids = selectedIds();
+    if (ids.length === 0) return;
+    const button = $('exportSelectedButton');
+    button.disabled = true;
+    try {
+        const response = await apiFetch(`/api/emails/export?ids=${ids.join(',')}`);
+        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || response.statusText);
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(await response.blob());
+        link.download = 'emails.zip';
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    } catch (error) {
+        alert(`Could not export the emails: ${error.message}`);
+    } finally {
+        button.disabled = selectedIds().length === 0;
+    }
 }
 
 async function deleteSelectedMessages() {
@@ -904,7 +959,51 @@ async function deleteSelectedMessages() {
 
 const MAX_BODY = 200000;
 const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
-const TEST_FIELDS = ['from', 'to', 'subject', 'text', 'html'];
+const TEST_FIELDS = ['from', 'to', 'cc', 'bcc', 'subject', 'text', 'html', 'attachments'];
+const MAX_FILES = 5;
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_FILES_TOTAL_BYTES = 5 * 1024 * 1024;
+
+// The files picked for the test email; they are read and sent when the form is submitted
+const attachedFiles = [];
+
+function renderAttachedFiles() {
+    const list = $('attachmentList');
+    list.replaceChildren();
+    attachedFiles.forEach((file, index) => {
+        const item = el('li');
+        item.appendChild(el('span', null, `${file.name} · ${formatBytes(file.size)}`));
+        const remove = el('button', 'ghost small', 'Remove');
+        remove.type = 'button';
+        remove.addEventListener('click', () => {
+            attachedFiles.splice(index, 1);
+            renderAttachedFiles();
+            setFieldError('attachments', '');
+            onFormInput();
+        });
+        item.appendChild(remove);
+        list.appendChild(item);
+    });
+}
+
+function addAttachedFiles(files) {
+    attachedFiles.push(...files);
+    $('attachmentsInput').value = ''; // so the same file can be picked again
+    setFieldError('attachments', '');
+    renderAttachedFiles();
+    onFormInput();
+}
+
+const readAsBase64 = file =>
+    new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+    });
+
+const readAttachments = () =>
+    Promise.all(attachedFiles.map(async file => ({ filename: file.name, contentType: file.type || 'application/octet-stream', content: await readAsBase64(file) })));
 
 // The server's SMTP address as seen from this page, filled in from /api/info
 let smtpInfo = {
@@ -932,6 +1031,8 @@ function formValues() {
     return {
         from: $('fromInput').value.trim(),
         to: $('toInput').value.trim(),
+        cc: $('ccInput').value.trim(),
+        bcc: $('bccInput').value.trim(),
         subject: $('subjectInput').value.trim(),
         text: $('textInput').value,
         html: $('htmlInput').value,
@@ -945,13 +1046,17 @@ function updateBodyCounter() {
 
 // Shows the swaks command that would deliver the same email over SMTP from outside the dashboard
 function updateEquivalentCommand() {
-    const { from, to, subject, text } = formValues();
+    const { from, to, cc, bcc, subject, text } = formValues();
     const quote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
+    // swaks sends to every --to address; Cc is also a header, and Bcc is simply an extra recipient
+    const recipients = [to || 'user@example.com', cc, bcc].filter(Boolean).join(',');
     const lines = [
         `swaks --server ${location.hostname}:${smtpInfo.smtpPort} \\`,
         `  --from ${quote(from || 'noreply@example.com')} \\`,
-        `  --to ${quote(to || 'user@example.com')} \\`,
+        `  --to ${quote(recipients)} \\`,
+        ...(cc ? [`  --header ${quote(`Cc: ${cc}`)} \\`] : []),
         `  --header ${quote(`Subject: ${subject || 'Test email'}`)} \\`,
+        ...attachedFiles.map(file => `  --attach ${quote(`@${file.name}`)} \\`),
         `  --body ${quote(text || 'Your verification code is 123456')}`,
     ];
     if (smtpInfo.smtpAuthRequired) lines.splice(1, 0, `  --auth-user ${quote(smtpInfo.smtpUsername || 'USERNAME')} --auth-password "$SMTP_PASSWORD" \\`);
@@ -968,13 +1073,17 @@ function clearFieldErrors() {
 }
 
 // Same rules as the server, so most mistakes are caught before sending
-function validateForm({ from, to, subject, text, html }) {
+function validateForm({ from, to, cc, bcc, subject, text, html }) {
     const errors = {};
     if (!EMAIL_RE.test(from)) errors.from = 'Enter an email address.';
-    const recipients = to.split(/[,;\s]+/).filter(Boolean);
-    if (recipients.length === 0 || recipients.length > 20 || !recipients.every(a => EMAIL_RE.test(a))) {
-        errors.to = 'Enter 1–20 email addresses separated by commas.';
-    }
+    const addresses = value => value.split(/[,;\s]+/).filter(Boolean);
+    const valid = list => list.length <= 20 && list.every(a => EMAIL_RE.test(a));
+    if (addresses(to).length === 0 || !valid(addresses(to))) errors.to = 'Enter 1–20 email addresses separated by commas.';
+    if (!valid(addresses(cc))) errors.cc = 'At most 20 email addresses, separated by commas.';
+    if (!valid(addresses(bcc))) errors.bcc = 'At most 20 email addresses, separated by commas.';
+    if (attachedFiles.length > MAX_FILES) errors.attachments = `At most ${MAX_FILES} files.`;
+    else if (attachedFiles.some(file => file.size > MAX_FILE_BYTES)) errors.attachments = `Each file can be at most ${MAX_FILE_BYTES / 1024 / 1024} MB.`;
+    else if (attachedFiles.reduce((sum, file) => sum + file.size, 0) > MAX_FILES_TOTAL_BYTES) errors.attachments = `The files together can be at most ${MAX_FILES_TOTAL_BYTES / 1024 / 1024} MB.`;
     if (subject.length > 255) errors.subject = 'At most 255 characters.';
     if (!text.trim() && !html.trim()) errors.text = 'Enter a text or an HTML body.';
     if (text.length > MAX_BODY) errors.text = `At most ${MAX_BODY.toLocaleString()} characters.`;
@@ -1005,6 +1114,8 @@ function onFormInput() {
 
 function clearForm() {
     $('messageForm').reset();
+    attachedFiles.length = 0;
+    renderAttachedFiles();
     clearFieldErrors();
     setFormStatus('');
     onFormInput();
@@ -1028,7 +1139,7 @@ async function sendMessage(event) {
         const response = await apiFetch('/api/emails/test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(values),
+            body: JSON.stringify({ ...values, attachments: await readAttachments() }),
         });
         const data = await response.json().catch(() => ({}));
         $('lastResponse').textContent = `HTTP ${response.status}\n${JSON.stringify(data, null, 2)}`;
@@ -1043,6 +1154,8 @@ async function sendMessage(event) {
             $('subjectInput').value = '';
             $('textInput').value = '';
             $('htmlInput').value = '';
+            attachedFiles.length = 0;
+            renderAttachedFiles();
             onFormInput();
             $('subjectInput').focus();
         } else if (data.details) {
@@ -1121,7 +1234,7 @@ function svgIcon(innerMarkup) {
     return svg;
 }
 
-function keyRow({ id, name, scope, prefix, lastUsedAt, createdAt, revokedAt }) {
+function keyRow({ id, name, scope, prefix, allowedRecipients = [], lastUsedAt, createdAt, revokedAt }) {
     const rowId = id;
     const revealUrl = `/api/keys/${id}/reveal`;
     const tr = el('tr', revokedAt ? 'key-revoked' : '');
@@ -1133,6 +1246,15 @@ function keyRow({ id, name, scope, prefix, lastUsedAt, createdAt, revokedAt }) {
     const typeCell = el('td');
     typeCell.appendChild(el('span', `scope-badge scope-${scope}`, scope === 'read' ? 'Read' : scope));
     tr.appendChild(typeCell);
+
+    const inboxCell = el('td');
+    if (allowedRecipients.length) {
+        const chips = el('span', 'key-inboxes');
+        allowedRecipients.forEach(rule => chips.appendChild(el('span', 'chip', rule)));
+        inboxCell.appendChild(chips);
+    } else {
+        inboxCell.appendChild(el('span', 'muted', 'All inboxes'));
+    }
 
     const keyCell = el('td', 'key-value');
     const shown = revealedKeys.get(rowId);
@@ -1166,6 +1288,7 @@ function keyRow({ id, name, scope, prefix, lastUsedAt, createdAt, revokedAt }) {
         keyCell.appendChild(actions);
     }
     tr.appendChild(keyCell);
+    tr.appendChild(inboxCell);
 
     tr.appendChild(el('td', 'muted', lastUsedAt ? formatMessageTime(lastUsedAt) : 'Never'));
     tr.appendChild(el('td', 'muted', new Date(createdAt).toLocaleDateString()));
@@ -1207,6 +1330,8 @@ function showKeyForm(visible) {
     $('newKeyButton').classList.toggle('hidden', visible);
     $('keyNameError').textContent = '';
     $('keyNameInput').classList.remove('invalid');
+    $('keyRecipientsError').textContent = '';
+    $('keyRecipientsInput').classList.remove('invalid');
     if (visible) {
         $('newKeyResult').classList.add('hidden');
         $('keyNameInput').focus();
@@ -1225,11 +1350,14 @@ async function createKey(event) {
     }
     $('createKeyButton').disabled = true;
     try {
-        const { response, data } = await apiJson('/api/keys', { method: 'POST', body: JSON.stringify({ name }) });
+        const allowedRecipients = $('keyRecipientsInput').value.trim();
+        const { response, data } = await apiJson('/api/keys', { method: 'POST', body: JSON.stringify({ name, allowedRecipients }) });
         if (!response.ok) {
-            const message = data.details ? Object.entries(data.details).map(([field, msg]) => `Name ${msg}.`).join(' ') : data.error;
-            $('keyNameError').textContent = message || 'Could not create the key.';
-            $('keyNameInput').classList.add('invalid');
+            const details = data.details || {};
+            $('keyNameError').textContent = details.name ? `Name ${details.name}.` : details.allowedRecipients ? '' : data.error || 'Could not create the key.';
+            $('keyNameInput').classList.toggle('invalid', Boolean(details.name) || !data.details);
+            $('keyRecipientsError').textContent = details.allowedRecipients ? `Recipients: ${details.allowedRecipients}.` : '';
+            $('keyRecipientsInput').classList.toggle('invalid', Boolean(details.allowedRecipients));
             return;
         }
         revealedKeys.set(data.key.id, data.secret);
@@ -1330,6 +1458,8 @@ window.addEventListener('DOMContentLoaded', () => {
     $('pageSizeSelect').addEventListener('change', changePageSize);
     $('selectAllCheckbox').addEventListener('change', event => toggleSelectAll(event.target.checked));
     $('deleteSelectedButton').addEventListener('click', deleteSelectedMessages);
+    $('exportSelectedButton').addEventListener('click', exportSelectedMessages);
+    $('attachmentsInput').addEventListener('change', event => addAttachedFiles(Array.from(event.target.files)));
     // Copies the plain-text body, whatever view is showing
     $('copyMessageButton').addEventListener('click', event => {
         const email = fullEmails.get(selectedId);
@@ -1362,6 +1492,10 @@ window.addEventListener('DOMContentLoaded', () => {
     $('newKeyButton').addEventListener('click', () => showKeyForm(true));
     $('cancelKeyButton').addEventListener('click', () => showKeyForm(false));
     $('newKeyForm').addEventListener('submit', createKey);
+    $('keyRecipientsInput').addEventListener('input', () => {
+        $('keyRecipientsError').textContent = '';
+        $('keyRecipientsInput').classList.remove('invalid');
+    });
     $('keyNameInput').addEventListener('input', () => {
         $('keyNameError').textContent = '';
         $('keyNameInput').classList.remove('invalid');
@@ -1381,5 +1515,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
     window.addEventListener('hashchange', showView);
     // Know the role before showing a view, so a viewer never lands on an admin-only page
-    loadSession().then(showView);
+    loadSession().then(() => {
+        showView();
+        startLiveUpdates();
+    });
 });

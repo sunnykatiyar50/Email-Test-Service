@@ -63,9 +63,15 @@ async function connect() {
             source TEXT NOT NULL DEFAULT 'dashboard',
             created_at TEXT NOT NULL,
             last_used_at TEXT,
-            revoked_at TEXT
+            revoked_at TEXT,
+            allowed_recipients TEXT
         )`
     );
+
+    // Added after the table was first introduced
+    if (!db.prepare('PRAGMA table_info(api_keys)').all().some(c => c.name === 'allowed_recipients')) {
+        db.exec('ALTER TABLE api_keys ADD COLUMN allowed_recipients TEXT');
+    }
 
     const run = (sql, params) => db.prepare(sql).run(...params.map(toParam));
 

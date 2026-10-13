@@ -1,4 +1,5 @@
 const { toIso } = require('../utils/time');
+const { visibleTo } = require('../utils/recipients');
 
 const SUMMARY_COLUMNS =
     'id, message_id, from_address, from_name, to_addresses, cc_addresses, envelope_from, envelope_to, ' +
@@ -47,13 +48,45 @@ function toAttachment(row) {
 // "%" and "_" in a search term are matched literally ("!" is the escape character in every query below)
 const likeTerm = value => `%${value.toLowerCase().replace(/[!%_]/g, '!$&')}%`;
 
+const escapeLike = text => `%${text.replace(/[!%_]/g, '!$&')}%`;
+const RECIPIENT_COLUMNS = ['to_addresses', 'cc_addresses', 'envelope_to'];
+const anyRecipientColumn = () => `(${RECIPIENT_COLUMNS.map(c => `LOWER(${c}) LIKE ? ESCAPE '!'`).join(' OR ')})`;
+
+// An exact address (case-insensitive) in To, Cc or the SMTP envelope (so Bcc too), not a substring:
+// "alice@example.com" must not match "malice@example.com". The columns hold JSON, so the address is
+// matched as a whole JSON string.
+function addressClause(address) {
+    const json = JSON.stringify(String(address).toLowerCase());
+    return { sql: anyRecipientColumn(), params: [escapeLike(`"address":${json}`), escapeLike(`"address":${json}`), escapeLike(json)] };
+}
+
+// What an API key limited to some recipients may see: emails sent to any of its rules (see utils/recipients.js).
+// A domain rule matches addresses ending in @domain" and a subdomain rule ending in .domain", the closing quote
+// being the end of the JSON string.
+function scopeClause(rules) {
+    const parts = [];
+    const params = [];
+    for (const rule of rules) {
+        if (rule.type === 'address') {
+            const { sql, params: p } = addressClause(rule.value);
+            parts.push(sql);
+            params.push(...p);
+        } else {
+            const suffix = escapeLike(`${rule.type === 'domain' ? '@' : '.'}${rule.value}"`);
+            parts.push(anyRecipientColumn());
+            params.push(suffix, suffix, suffix);
+        }
+    }
+    return { sql: `(${parts.join(' OR ')})`, params };
+}
+
 class EmailModel {
     // db is the adapter returned by database/initDatabase.js
     constructor(db) {
         this.db = db;
     }
 
-    buildFilters({ search, to, from, subject, after, before } = {}) {
+    buildFilters({ search, to, from, subject, after, before, scope } = {}) {
         const clauses = [];
         const params = [];
         const matchAny = (columns, term) => {
@@ -62,15 +95,14 @@ class EmailModel {
         };
         if (search) matchAny(['subject', 'from_address', 'from_name', 'to_addresses', 'envelope_to', 'text_body'], search);
         if (to) {
-            // An exact address (case-insensitive) in To, Cc or the SMTP envelope (so Bcc too), not a substring:
-            // "alice@example.com" must not match "malice@example.com". The columns hold JSON, so the
-            // address is matched as a whole JSON string.
-            const address = JSON.stringify(to.toLowerCase());
-            const escaped = text => `%${text.replace(/[!%_]/g, '!$&')}%`;
-            clauses.push(
-                "(LOWER(to_addresses) LIKE ? ESCAPE '!' OR LOWER(cc_addresses) LIKE ? ESCAPE '!' OR LOWER(envelope_to) LIKE ? ESCAPE '!')"
-            );
-            params.push(escaped(`"address":${address}`), escaped(`"address":${address}`), escaped(address));
+            const { sql, params: p } = addressClause(to);
+            clauses.push(sql);
+            params.push(...p);
+        }
+        if (scope && scope.length) {
+            const { sql, params: p } = scopeClause(scope);
+            clauses.push(sql);
+            params.push(...p);
         }
         if (from) matchAny(['from_address', 'from_name'], from);
         if (subject) matchAny(['subject'], subject);
@@ -145,6 +177,37 @@ class EmailModel {
             params
         );
         return rows.map(toSummary);
+    }
+
+    // One email's summary (no body), or null
+    async getSummary(id) {
+        const [row] = await this.db.all(`SELECT ${SUMMARY_COLUMNS} FROM emails WHERE id = ?`, [id]);
+        return row ? toSummary(row) : null;
+    }
+
+    // Whether the email exists and an API key limited to `rules` may see it (no rules: any existing email)
+    async isVisible(id, rules) {
+        const [row] = await this.db.all('SELECT to_addresses, cc_addresses, envelope_to FROM emails WHERE id = ?', [id]);
+        if (!row) return false;
+        return visibleTo(
+            { to: parseJson(row.to_addresses, []), cc: parseJson(row.cc_addresses, []), envelope: { to: parseJson(row.envelope_to, []) } },
+            rules
+        );
+    }
+
+    // id, subject, size and time of the given emails, for sizing an export before reading the messages
+    async describe(ids) {
+        if (ids.length === 0) return [];
+        const rows = await this.db.all(
+            `SELECT id, subject, size, timestamp FROM emails WHERE id IN (${ids.map(() => '?').join(', ')}) ORDER BY timestamp ASC, id ASC`,
+            ids
+        );
+        return rows.map(row => ({ id: Number(row.id), subject: row.subject || '', size: Number(row.size), timestamp: toIso(row.timestamp) }));
+    }
+
+    async count() {
+        const [row] = await this.db.all('SELECT COUNT(*) AS total FROM emails');
+        return Number(row.total);
     }
 
     async getRaw(id) {

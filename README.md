@@ -12,10 +12,12 @@ Built with Node.js and Express, using [`smtp-server`](https://github.com/nodemai
   - **Emails**: list with search (subject, addresses, body), date filters, quick time ranges, pagination, bulk delete and keyboard navigation (↑/↓ or j/k).
   - Each email opens with tabs: **HTML** (sandboxed preview), **Text**, **Links**, **Checks**, **Headers**, **Attachments** (downloadable), **Thread** and **Raw**, plus one-click **Copy code** for verification codes and **Download .eml**.
   - The HTML preview has a **Mobile / Tablet / Desktop** width switch, a simulated **Dark** mode, and a **Load images** switch (remote images are blocked by default).
-  - **Send test**: store a test email from the dashboard, with the equivalent `swaks` command.
+  - **Send test**: store a test email from the dashboard, with To, Cc, Bcc, HTML and text bodies and attachments, plus the equivalent `swaks` command.
   - **Setup & API**: SMTP settings and copyable examples generated for your server.
 - **API for tests**: `GET /api/emails/latest?to=user@example.com` returns the newest email with the detected one-time `code` and every `link` in it, which is what E2E tests need for sign-up and password-reset flows. `GET /api/emails/wait` waits for the email to arrive, `DELETE /api/emails?to=…` empties an inbox between tests, and a [small client](#end-to-end-tests) wraps it all (`waitForCode`, `waitForLink`).
 - **Webhook** on every received email (optionally signed), for CI jobs and other services.
+- **Live updates**: the dashboard shows new emails as they arrive (Server-Sent Events, also available to scripts).
+- **API keys limited to some inboxes**, **export** of emails as a zip of `.eml` files, and a **Prometheus** `/metrics` endpoint.
 - API keys managed in the dashboard (Read keys for tests), an admin token for scripts, a password-protected dashboard and optional read-only viewer accounts.
 - Light and dark themes, input validation, rate limiting, security headers, optional automatic cleanup of old emails, and daily-rotated logs. Email content is never logged.
 
@@ -42,6 +44,7 @@ email-test-service
 │   ├── mail
 │   │   ├── smtpServer.js         # smtp-server: accepts mail, login, TLS, allowed domains, failure simulation
 │   │   ├── relay.js              # Optional forwarding of allowlisted recipients to a real mail server
+│   │   ├── analyze.js            # Deliverability checks; linkCheck.js requests an email's links
 │   │   ├── ingest.js             # Raw message in, stored email out (SMTP and "Send test")
 │   │   ├── events.js             # Wakes up requests waiting in /api/emails/wait
 │   │   ├── webhook.js            # POSTs each received email to WEBHOOK_URL
@@ -53,7 +56,7 @@ email-test-service
 │   ├── models                    # emailModel.js, apiKeyModel.js
 │   ├── middleware                # auth.js (sessions, keys, ADMIN_TOKEN), validate.js
 │   ├── database                  # SQLite (node:sqlite), PostgreSQL, MySQL
-│   ├── utils                     # otp.js, links.js, recipients.js, apiKeys.js, session.js, logger.js, time.js
+│   ├── utils                     # otp.js, links.js, recipients.js, metrics.js, zip.js, apiKeys.js, session.js, logger.js, time.js
 │   └── views                     # Dashboard (static files)
 ├── client                        # Zero-dependency helper for E2E tests (index.js + index.d.ts)
 ├── test                          # node:test suites (npm test)
@@ -111,6 +114,58 @@ Try it without an application:
 swaks --server localhost:1025 --from noreply@example.com --to user@example.com \
   --header 'Subject: Hello' --body 'Your verification code is 123456'
 ```
+
+## Operations
+
+### Live updates
+
+The dashboard opens `GET /api/emails/stream`, a [Server-Sent Events](https://developer.mozilla.org/docs/Web/API/Server-sent_events) stream, and reloads the list when an email arrives (a **Live** marker shows next to the title, and new rows flash once). Scripts can use it too, for example to watch mail arrive:
+
+```
+curl -N -H "Authorization: Bearer $API_KEY" http://localhost:30004/api/emails/stream
+```
+
+Each stored email produces `event: email` with the email's summary as JSON `data:`; a comment line every 25 seconds keeps idle connections open. A key limited to some inboxes only receives events for those. Behind a reverse proxy, turn response buffering off for this path (the server already sends `X-Accel-Buffering: no` for nginx). At most 100 streams are open at once.
+
+### API keys limited to some inboxes
+
+When creating a key, **Limit to recipients** restricts it to emails sent to certain addresses or domains, so parallel CI jobs or different teams sharing one server can't read each other's mail:
+
+```
+ci-1@example.com, example.org, *.test.local
+```
+
+Entries are addresses, domains (`example.org`) or subdomain wildcards (`*.test.local`, which does not include `test.local` itself); the API takes the same text, or a list, as `allowedRecipients` when creating the key. A recipient counts if it is in To, Cc or the SMTP envelope (so Bcc too). For a limited key, every endpoint behaves as if other emails did not exist: lists, counts, `latest`, `wait`, a single email, its raw message, preview, attachments, thread, export and the event stream. Emails outside the limit return `404`. An empty limit (the default) means every inbox. The keys page shows each key's inboxes.
+
+### Export
+
+**Export selected** in the email list downloads a zip of the original messages (`email-<id>-<subject>.eml`), for attaching to a bug report or opening in a mail client. The same is available as `GET /api/emails/export?ids=1,2,3` (up to 100 emails and 100 MB; emails a limited key can't see are left out).
+
+### Metrics
+
+`GET /metrics` serves [Prometheus](https://prometheus.io) metrics, with the same access as reading emails: send a Read key (or the admin token) as a bearer token. `METRICS=false` turns it off.
+
+```yaml
+scrape_configs:
+  - job_name: email-test-service
+    authorization: { credentials: mail_read_... }   # a Read key
+    static_configs: [{ targets: ['localhost:30004'] }]
+```
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `email_test_smtp_connections_total` | counter | SMTP connections accepted |
+| `email_test_emails_received_total` | counter | Emails stored (SMTP and dashboard) |
+| `email_test_received_bytes_total` | counter | Size of the stored emails |
+| `email_test_recipients_rejected_total{reason}` | counter | Recipients refused: `allowed_domains`, `simulated` |
+| `email_test_messages_rejected_total{reason}` | counter | Messages refused after DATA: `size`, `simulated`, `store_error` |
+| `email_test_webhook_deliveries_total{result}` | counter | Webhook deliveries: `success`, `failure` |
+| `email_test_relay_total{result}` | counter | Relayed emails: `sent`, `failed` |
+| `email_test_emails_stored` | gauge | Emails currently stored |
+| `email_test_event_streams` | gauge | Open live-update connections |
+| `email_test_uptime_seconds` | gauge | Seconds since the service started |
+
+Counters start at 0 when the service starts. No addresses, subjects or content are exposed.
 
 ## SMTP behavior
 
@@ -296,10 +351,13 @@ The bodies and headers are not included; fetch `GET /api/emails/:id` for them. W
 | `GET` | `/api/emails/:id/preview` | The HTML (or text) body as a locked-down page, for embedding; add `?images=true` to allow remote images |
 | `GET` | `/api/emails/:id/thread` | `{ "emails": [...] }`: summaries of the emails in the same conversation, oldest first (empty if it has no `Message-ID` / `In-Reply-To` / `References` to go by) |
 | `POST` | `/api/emails/:id/check-links` | Admin. Requests each link in the email and returns `{ "results": [{ "url", "ok", "status", "finalUrl", "ms", "error" }], "skipped": 0 }`. `403` when `LINK_CHECK=false` |
-| `POST` | `/api/emails/test` | Admin. Store a test email: `{ "from", "fromName"?, "to": "a@x.com, b@x.com", "subject"?, "text"?, "html"? }` (text or html required) |
+| `POST` | `/api/emails/test` | Admin. Store a test email: `{ "from", "fromName"?, "to": "a@x.com, b@x.com", "cc"?, "bcc"?, "subject"?, "text"?, "html"?, "attachments"?: [{ "filename", "contentType"?, "content": "<base64>" }] }` (text or html required; up to 5 files, 2 MB each, 5 MB in all; Bcc is only in the envelope) |
+| `GET` | `/api/emails/stream` | Server-Sent Events: an `email` event (the summary) for each email stored from now on |
+| `GET` | `/api/emails/export` | `?ids=1,2,3`: a zip of the original `.eml` files (up to 100 emails) |
+| `GET` | `/metrics` | Prometheus metrics (Read key or admin) |
 | `DELETE` | `/api/emails/:id` | Admin. Delete an email and its attachments (`404` if it doesn't exist) |
 | `DELETE` | `/api/emails` | Admin. Delete several (up to 500): `{ "ids": [1, 2, 3] }`. Or empty one inbox: `?to=user@example.com` (other filters narrow it further). One of the two is required, so a bare `DELETE` deletes nothing |
-| `GET` / `POST` / `DELETE` | `/api/keys` … | Admin. List, create (`{ "name": "ci-tests" }`), reveal (`POST /:id/reveal`) and revoke keys |
+| `GET` / `POST` / `DELETE` | `/api/keys` … | Admin. List, create (`{ "name": "ci-tests", "allowedRecipients"?: "a@x.com, example.org" }`), reveal (`POST /:id/reveal`) and revoke keys |
 | `GET` | `/api/info` | SMTP port and whether SMTP login is required (used by the dashboard) |
 | `GET` | `/health` | Public. `{ "status": "ok" }` when the database is reachable, `503` otherwise |
 
@@ -372,6 +430,7 @@ See `sample.env` for a commented template.
 | `RELAY_USER`, `RELAY_PASSWORD` | — | Relay login (set both or neither) |
 | `RELAY_FROM` | — | Envelope sender used when relaying |
 | `RELAY_ALLOW` | — | Required with `RELAY_HOST`: addresses, domains or `*.domains` that may be forwarded |
+| `METRICS` | `true` | `false` turns off `GET /metrics` |
 | `LINK_CHECK` | `true` | `false` turns off the dashboard's link checker (the server requesting the email's links) |
 | `WEBHOOK_URL` | — | Optional. POSTed to for every stored email (see [Webhook](#webhook)) |
 | `WEBHOOK_SECRET` | — | Optional. Signs webhook requests (`X-Signature-256`) |

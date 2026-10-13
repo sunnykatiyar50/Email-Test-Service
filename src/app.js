@@ -11,6 +11,7 @@ const { createWebhook } = require('./mail/webhook');
 const { createRelay } = require('./mail/relay');
 const { createSmtpServer, listen: listenSmtp } = require('./mail/smtpServer');
 const { logToFile } = require('./utils/logger');
+const { Metrics } = require('./utils/metrics');
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -46,17 +47,18 @@ async function main() {
     scheduleRetention(emailModel, config.retentionDays);
 
     const events = createEvents();
-    const webhook = createWebhook({ url: config.webhookUrl, secret: config.webhookSecret });
+    const metrics = new Metrics();
+    const webhook = createWebhook({ url: config.webhookUrl, secret: config.webhookSecret, metrics });
     if (webhook) logToFile(`Webhook enabled: new emails are POSTed to ${new URL(config.webhookUrl).host}`);
-    const relay = createRelay(config);
+    const relay = createRelay(config, metrics);
     if (relay) logToFile(`Relay enabled: mail for ${config.relayAllow.length} allowed recipient rule(s) is forwarded via ${config.relayHost}`);
-    const ingest = createIngest({ emailModel, events, webhook, relay });
-    const app = createApp({ config, emailModel, apiKeyModel, ingest, events });
+    const ingest = createIngest({ emailModel, events, webhook, relay, metrics });
+    const app = createApp({ config, emailModel, apiKeyModel, ingest, events, metrics });
     const server = app.listen(config.port, () => {
         logToFile(`Dashboard and API are running on http://localhost:${config.port}`);
     });
 
-    const smtp = createSmtpServer({ config, ingest });
+    const smtp = createSmtpServer({ config, ingest, metrics });
     const smtpPort = await listenSmtp(smtp, { port: config.smtpPort, host: config.smtpHost });
     const tlsNote = config.smtpTlsKey ? ', STARTTLS available' : '';
     logToFile(
@@ -65,7 +67,7 @@ async function main() {
     );
     const smtpServers = [smtp];
     if (config.smtpTlsPort) {
-        const smtpTls = createSmtpServer({ config, ingest, secure: true });
+        const smtpTls = createSmtpServer({ config, ingest, secure: true, metrics });
         const tlsPort = await listenSmtp(smtpTls, { port: config.smtpTlsPort, host: config.smtpHost });
         logToFile(`SMTP over TLS is listening on ${config.smtpHost}:${tlsPort}`);
         smtpServers.push(smtpTls);

@@ -1,12 +1,13 @@
 const nodemailer = require('nodemailer');
 const { matchesAny } = require('../utils/recipients');
 const { logToFile } = require('../utils/logger');
+const { Metrics } = require('../utils/metrics');
 
 // Optionally forwards a stored email to a real mail server, for the recipients on an allowlist only.
 // Off unless RELAY_HOST is set, and it refuses to start without RELAY_ALLOW, so a test server can't be
 // turned into an open relay. The email is stored either way; relaying is best effort and failures are
 // logged. Returns null when no relay is configured.
-function createRelay(config) {
+function createRelay(config, metrics = new Metrics()) {
     if (!config.relayHost) return null;
 
     const transport = nodemailer.createTransport({
@@ -23,8 +24,10 @@ function createRelay(config) {
         const from = config.relayFrom || (envelope.mailFrom && envelope.mailFrom.address) || undefined;
         try {
             await transport.sendMail({ envelope: { from, to: recipients }, raw });
+            metrics.inc('email_test_relay_total', { result: 'sent' });
             logToFile(`Relayed email id=${id} to ${recipients.length} allowed recipient(s) via ${config.relayHost}`);
         } catch (error) {
+            metrics.inc('email_test_relay_total', { result: 'failed' });
             logToFile(`Relay of email id=${id} via ${config.relayHost} failed: ${error.message}`);
         }
     };

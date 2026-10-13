@@ -68,9 +68,17 @@ async function connect() {
             source VARCHAR(16) NOT NULL DEFAULT 'dashboard',
             created_at DATETIME(3) NOT NULL,
             last_used_at DATETIME(3),
-            revoked_at DATETIME(3)
+            revoked_at DATETIME(3),
+            allowed_recipients TEXT
         )
     `);
+    const [recipientsColumn] = await pool.query(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'api_keys' AND COLUMN_NAME = 'allowed_recipients'`
+    );
+    if (recipientsColumn.length === 0) {
+        await pool.query('ALTER TABLE api_keys ADD COLUMN allowed_recipients TEXT');
+    }
     return {
         dialect: 'mysql',
         all: async (sql, params = []) => (await pool.query(sql, params))[0],

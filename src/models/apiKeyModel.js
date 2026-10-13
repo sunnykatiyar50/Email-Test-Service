@@ -1,7 +1,11 @@
 const { toIso } = require('../utils/time');
 const { generateApiKey, hashApiKey, keyPrefix, createKeyCipher } = require('../utils/apiKeys');
+const { parseRules, describeRule } = require('../utils/recipients');
 
 const LAST_USED_INTERVAL_MS = 60 * 1000; // write last_used_at at most once a minute per key
+
+// The rules stored for a key, as text ("a@x.com,example.com"), in the form they were written
+const rulesText = row => (row.allowed_recipients || '').split(',').map(s => s.trim()).filter(Boolean);
 
 function toKey(row) {
     return {
@@ -13,6 +17,8 @@ function toKey(row) {
         createdAt: toIso(row.created_at),
         lastUsedAt: toIso(row.last_used_at),
         revokedAt: toIso(row.revoked_at),
+        // Empty: the key can read every inbox. Otherwise only emails sent to these addresses and domains.
+        allowedRecipients: rulesText(row),
     };
 }
 
@@ -39,12 +45,14 @@ class ApiKeyModel {
     }
 
     // Returns the new key's metadata and the full key
-    async create({ name, scope, secret = generateApiKey(scope), source = 'dashboard' }) {
+    // allowedRecipients: addresses / domains (see utils/recipients.js) the key is limited to; [] means no limit
+    async create({ name, scope, secret = generateApiKey(scope), source = 'dashboard', allowedRecipients = [] }) {
         const createdAt = new Date();
+        const rules = parseRules(allowedRecipients.join(',')).map(describeRule);
         const id = await this.db.insert(
-            `INSERT INTO api_keys (name, scope, key_hash, key_prefix, key_encrypted, source, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [name, scope, hashApiKey(secret), keyPrefix(secret), this.cipher.encrypt(secret), source, createdAt]
+            `INSERT INTO api_keys (name, scope, key_hash, key_prefix, key_encrypted, source, created_at, allowed_recipients)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [name, scope, hashApiKey(secret), keyPrefix(secret), this.cipher.encrypt(secret), source, createdAt, rules.length ? rules.join(',') : null]
         );
         const [row] = await this.db.all('SELECT * FROM api_keys WHERE id = ?', [Number(id)]);
         return { key: toKey(row), secret };
@@ -65,16 +73,16 @@ class ApiKeyModel {
         return { key: toKey(row), changed: changed > 0 };
     }
 
-    // Looks up an active key by its value; returns { id, name, scope } or null
+    // Looks up an active key by its value; returns { id, name, scope, allowedRecipients: [rule] } or null
     async authenticate(presented) {
         if (typeof presented !== 'string' || !presented || presented.length > 512) return null;
         const [row] = await this.db.all(
-            'SELECT id, name, scope FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL',
+            'SELECT id, name, scope, allowed_recipients FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL',
             [hashApiKey(presented)]
         );
         if (!row) return null;
         this.touch(Number(row.id));
-        return { id: Number(row.id), name: row.name, scope: row.scope };
+        return { id: Number(row.id), name: row.name, scope: row.scope, allowedRecipients: parseRules(row.allowed_recipients || '') };
     }
 
     // Records when a key was last used, without a database write on every request

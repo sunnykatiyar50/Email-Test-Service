@@ -67,9 +67,11 @@ async function connect() {
             source VARCHAR(16) NOT NULL DEFAULT 'dashboard',
             created_at TIMESTAMPTZ NOT NULL,
             last_used_at TIMESTAMPTZ,
-            revoked_at TIMESTAMPTZ
+            revoked_at TIMESTAMPTZ,
+            allowed_recipients TEXT
         )
     `);
+    await pool.query('ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allowed_recipients TEXT');
 
     return {
         dialect: 'postgres',

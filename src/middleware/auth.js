@@ -64,7 +64,7 @@ function createAuth(config, { apiKeyModel } = {}) {
         const presented = req.get('x-api-key') || bearerToken(req);
         if (!presented || !apiKeyModel) return null;
         const stored = await apiKeyModel.authenticate(presented);
-        return stored ? { name: stored.name, scope: stored.scope } : null;
+        return stored ? { name: stored.name, scope: stored.scope, allowedRecipients: stored.allowedRecipients } : null;
     }
 
     function requireAdmin(req, res, next) {
@@ -96,7 +96,14 @@ function createAuth(config, { apiKeyModel } = {}) {
             if (key.scope !== scope) {
                 return res.status(403).json({ error: `This key can't be used here (needs a ${scope} key)` });
             }
-            req.auth = { method: 'apiKey', apiKeyName: key.name, scope: key.scope, isAdmin: false };
+            // recipientScope: the inboxes this key is limited to (rules from utils/recipients.js), or null for all
+            req.auth = {
+                method: 'apiKey',
+                apiKeyName: key.name,
+                scope: key.scope,
+                isAdmin: false,
+                recipientScope: key.allowedRecipients && key.allowedRecipients.length ? key.allowedRecipients : null,
+            };
             next();
         };
     }

@@ -6,11 +6,12 @@ const { createAuth } = require('./middleware/auth');
 const createEmailRoutes = require('./routes/emailRoutes');
 const createApiKeyRoutes = require('./routes/apiKeyRoutes');
 const { logToFile } = require('./utils/logger');
+const { Metrics } = require('./utils/metrics');
 
 const viewsDir = path.join(__dirname, 'views');
 
 // Builds the Express app. Kept separate from app.js so tests can create it with their own config and database.
-function createApp({ config, emailModel, apiKeyModel, ingest, events }) {
+function createApp({ config, emailModel, apiKeyModel, ingest, events, metrics = new Metrics() }) {
     const app = express();
     const auth = createAuth(config, { apiKeyModel });
 
@@ -38,8 +39,12 @@ function createApp({ config, emailModel, apiKeyModel, ingest, events }) {
             },
         })
     );
-    // Large enough for the "Send test" form's HTML body
-    app.use(express.json({ limit: '600kb' }));
+    metrics.gauge('email_test_emails_stored', 'Emails currently stored.', () => emailModel.count());
+
+    // Small bodies for the API. "Send test" can carry attachments, so it parses its own (larger) body after
+    // authenticating; see emailRoutes.js.
+    const jsonBody = express.json({ limit: '600kb' });
+    app.use((req, res, next) => (req.path === '/api/emails/test' ? next() : jsonBody(req, res, next)));
 
     app.get('/health', async (req, res) => {
         try {
@@ -74,8 +79,13 @@ function createApp({ config, emailModel, apiKeyModel, ingest, events }) {
             smtpUsername: req.auth.isAdmin ? config.smtpUsername || null : null,
         });
     });
-    app.use('/api/emails', createEmailRoutes({ emailModel, ingest, events, auth, config }));
+    app.use('/api/emails', createEmailRoutes({ emailModel, ingest, events, auth, config, metrics }));
     app.use('/api/keys', createApiKeyRoutes({ apiKeyModel, auth, config }));
+    // Prometheus metrics: the same access as reading emails (a Read key works as a bearer token for the scraper)
+    app.get('/metrics', auth.requireRead, async (req, res) => {
+        if (!config.metricsEnabled) return res.status(404).json({ error: 'Not found' });
+        res.type('text/plain; version=0.0.4; charset=utf-8').send(await metrics.render());
+    });
     app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
     // The dashboard needs a session; the login page and static assets are public

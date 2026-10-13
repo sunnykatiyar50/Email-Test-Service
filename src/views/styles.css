@@ -1477,7 +1477,7 @@ body.login-page {
 /* ===== API keys view ===== */
 .key-form {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
     gap: 12px;
     align-items: end;
 }
@@ -1979,4 +1979,72 @@ body.role-viewer .admin-only {
 
 .header-table td {
     overflow-wrap: anywhere;
+}
+
+/* ===== Operations: live updates, attachments, key inboxes ===== */
+.live {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--success);
+}
+
+.live::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: live-pulse 2s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+    50% { opacity: 0.35; }
+}
+
+.message-row.fresh {
+    animation: row-fresh 2.2s ease-out;
+}
+
+@keyframes row-fresh {
+    from { background: var(--blue-soft); }
+}
+
+.file-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 13px;
+}
+
+.file-list:empty {
+    display: none;
+}
+
+.file-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 4px 0;
+}
+
+.key-inboxes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.key-inboxes .chip {
+    font-family: var(--mono);
+    font-size: 11.5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .live::before,
+    .message-row.fresh {
+        animation: none;
+    }
 }

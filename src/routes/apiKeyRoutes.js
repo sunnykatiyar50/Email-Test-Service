@@ -1,6 +1,7 @@
 const express = require('express');
 const { SCOPES } = require('../utils/apiKeys');
 const { logToFile } = require('../utils/logger');
+const { parseRules, describeRule } = require('../utils/recipients');
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/;
 
@@ -33,12 +34,22 @@ function createApiKeyRoutes({ apiKeyModel, auth, config }) {
         } else if (name.toLowerCase() === 'dashboard' || (await apiKeyModel.nameExists(name))) {
             errors.name = 'is already used by another key';
         }
+        // Optional: limit the key to some inboxes ("a@x.com, example.com, *.test.local"; a list or comma separated text)
+        let allowedRecipients = [];
+        try {
+            const given = Array.isArray(body.allowedRecipients) ? body.allowedRecipients.join(',') : body.allowedRecipients || '';
+            if (typeof given !== 'string') throw new Error('must be a list of addresses and domains');
+            allowedRecipients = parseRules(given).map(describeRule);
+            if (allowedRecipients.length > 50) throw new Error('can have at most 50 entries');
+        } catch (error) {
+            errors.allowedRecipients = error.message;
+        }
         const scope = body.scope === undefined ? SCOPES[0] : body.scope;
         if (!SCOPES.includes(scope)) errors.scope = `must be one of ${SCOPES.join(', ')}`;
         if (Object.keys(errors).length) return res.status(400).json({ error: 'Validation failed', details: errors });
 
-        const { key, secret } = await apiKeyModel.create({ name, scope });
-        logToFile(`API key created: "${name}" (${scope}) from ${req.ip}`);
+        const { key, secret } = await apiKeyModel.create({ name, scope, allowedRecipients });
+        logToFile(`API key created: "${name}" (${scope}${allowedRecipients.length ? `, limited to ${allowedRecipients.length} recipient rule(s)` : ''}) from ${req.ip}`);
         res.status(201).json({ key, secret });
     });
 

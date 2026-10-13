@@ -63,6 +63,8 @@ function loadConfig(env = process.env) {
         relayPassword: env.RELAY_PASSWORD || '',
         relayFrom: (env.RELAY_FROM || '').trim(),
         relayAllow: [], // filled in below
+        // GET /metrics (Prometheus)
+        metricsEnabled: env.METRICS !== 'false',
         // Lets an admin check an email's links from the dashboard (the server then requests those URLs)
         linkCheck: env.LINK_CHECK !== 'false',
         // POSTed to for every stored email (see src/mail/webhook.js); signed when a secret is set

@@ -3,6 +3,7 @@ const { SMTPServer } = require('smtp-server');
 const { safeEqual } = require('../utils/session');
 const { matchesAny, describeRule } = require('../utils/recipients');
 const { logToFile } = require('../utils/logger');
+const { Metrics } = require('../utils/metrics');
 
 // Accepts every message, from anyone to anyone, and stores it. Nothing is relayed unless the optional relay
 // is configured (see relay.js).
@@ -46,7 +47,7 @@ function simulate(address) {
 }
 
 // secure: TLS from the first byte (the SMTP_TLS_PORT listener); otherwise plain, with STARTTLS if there is a certificate
-function createSmtpServer({ config, ingest, secure = false }) {
+function createSmtpServer({ config, ingest, secure = false, metrics = new Metrics() }) {
     const authRequired = Boolean(config.smtpUsername);
     const tls = config.smtpTlsKey && config.smtpTlsCert
         ? { key: fs.readFileSync(config.smtpTlsKey), cert: fs.readFileSync(config.smtpTlsCert) }
@@ -63,6 +64,11 @@ function createSmtpServer({ config, ingest, secure = false }) {
         size: config.maxEmailBytes,
         logger: false,
 
+        onConnect(session, callback) {
+            metrics.inc('email_test_smtp_connections_total');
+            callback();
+        },
+
         onAuth(auth, session, callback) {
             if (!authRequired) return callback(null, { user: auth.username || 'anonymous' });
             // Evaluate both so timing doesn't reveal which one was wrong
@@ -77,11 +83,15 @@ function createSmtpServer({ config, ingest, secure = false }) {
             // Only mail for the listed domains, so a mistyped address in an app's config is caught
             if (config.smtpAllowedDomains.length && !matchesAny(config.smtpAllowedDomains, address.address)) {
                 const allowed = config.smtpAllowedDomains.map(describeRule).join(', ');
+                metrics.inc('email_test_recipients_rejected_total', { reason: 'allowed_domains' });
                 return callback(failure(550, `Relay access denied: this server only accepts mail for ${allowed}`));
             }
             if (!config.smtpSimulate) return callback();
             const { error, delay, dataFail } = simulate(address.address);
-            if (error) return callback(error);
+            if (error) {
+                metrics.inc('email_test_recipients_rejected_total', { reason: 'simulated' });
+                return callback(error);
+            }
             if (dataFail) session.simulateDataFailure = true;
             if (delay) return setTimeout(callback, delay);
             callback();
@@ -95,9 +105,13 @@ function createSmtpServer({ config, ingest, secure = false }) {
                 if (stream.sizeExceeded) {
                     const error = new Error(`Message exceeds the ${Math.round(config.maxEmailBytes / 1048576)} MB limit`);
                     error.responseCode = 552;
+                    metrics.inc('email_test_messages_rejected_total', { reason: 'size' });
                     return callback(error);
                 }
-                if (session.simulateDataFailure) return callback(failure(554, 'Transaction failed (simulated)'));
+                if (session.simulateDataFailure) {
+                    metrics.inc('email_test_messages_rejected_total', { reason: 'simulated' });
+                    return callback(failure(554, 'Transaction failed (simulated)'));
+                }
                 try {
                     const { id, size, recipients } = await ingest(Buffer.concat(chunks), {
                         envelope: session.envelope,
@@ -107,6 +121,7 @@ function createSmtpServer({ config, ingest, secure = false }) {
                     logToFile(`Stored email id=${id} size=${size} recipients=${recipients} from=${session.remoteAddress}`);
                     callback();
                 } catch (error) {
+                    metrics.inc('email_test_messages_rejected_total', { reason: 'store_error' });
                     logToFile(`Failed to store email: ${error.stack || error}`);
                     callback(failure(451, 'Could not store the message, try again'));
                 }

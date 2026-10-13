@@ -1,14 +1,17 @@
 const { parseEmail } = require('./parse');
 const { presentEmail } = require('./present');
 const { logToFile } = require('../utils/logger');
+const { Metrics } = require('../utils/metrics');
 
 // The one way mail enters the system: raw message bytes in, stored email id out.
 // Used by the SMTP server and by the dashboard's "Send test" form. After storing, it wakes requests waiting
 // in GET /api/emails/wait (events), calls the webhook, and forwards to the relay, if those are configured.
-function createIngest({ emailModel, events = null, webhook = null, relay = null }) {
+function createIngest({ emailModel, events = null, webhook = null, relay = null, metrics = new Metrics() }) {
     return async function ingest(raw, options) {
         const record = await parseEmail(raw, options);
         const { id, timestamp } = await emailModel.create(record);
+        metrics.inc('email_test_emails_received_total');
+        metrics.inc('email_test_received_bytes_total', {}, record.size);
         if (events) events.emit('email', id);
         if (webhook) {
             // Not awaited: a slow receiver must not delay the SMTP reply

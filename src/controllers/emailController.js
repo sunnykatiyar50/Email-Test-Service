@@ -1,4 +1,6 @@
 const { logToFile } = require('../utils/logger');
+const { visibleTo } = require('../utils/recipients');
+const { createZip } = require('../utils/zip');
 const { presentEmail } = require('../mail/present');
 const { checkLinks } = require('../mail/linkCheck');
 const { buildRawMessage } = require('../mail/compose');
@@ -14,22 +16,47 @@ const previewPolicy = remoteImages =>
     "frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox";
 
 const CLIENT_GONE = Symbol('client gone');
+const MAX_EVENT_STREAMS = 100;
+const HEARTBEAT_MS = 25000;
+const MAX_EXPORT_BYTES = 100 * 1024 * 1024;
+
+// "Welcome / confirm your account!" -> "welcome-confirm-your-account", for file names
+const slug = text => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'email';
 
 class EmailController {
-    constructor(emailModel, ingest, events, config) {
+    constructor(emailModel, ingest, events, config, metrics) {
         this.emailModel = emailModel;
         this.ingest = ingest;
         this.events = events;
         this.config = config;
+        this.eventStreams = 0;
+        metrics.gauge('email_test_event_streams', 'Open live-update connections (GET /api/events).', () => this.eventStreams);
     }
 
     present(email) {
         return presentEmail(email);
     }
 
+    // The inboxes the caller is limited to (an API key created with "allowed recipients"), or null for all
+    scope(req) {
+        return req.auth.recipientScope || null;
+    }
+
+    // The list filters with the caller's inbox limit applied
+    filters(req) {
+        return { ...req.listQuery.filters, scope: this.scope(req) };
+    }
+
+    // An email outside the caller's inboxes doesn't exist as far as they can tell
+    async hasAccess(req, res, id) {
+        if (await this.emailModel.isVisible(id, this.scope(req))) return true;
+        res.status(404).json({ error: 'Email not found.' });
+        return false;
+    }
+
     async getEmails(req, res) {
-        const { page, pageSize, filters } = req.listQuery;
-        const { total, emails } = await this.emailModel.list({ ...filters, limit: pageSize, offset: (page - 1) * pageSize });
+        const { page, pageSize } = req.listQuery;
+        const { total, emails } = await this.emailModel.list({ ...this.filters(req), limit: pageSize, offset: (page - 1) * pageSize });
         res.status(200).json({
             emails,
             totalPages: Math.max(1, Math.ceil(total / pageSize)),
@@ -39,7 +66,7 @@ class EmailController {
     }
 
     async getLatestEmail(req, res) {
-        const email = await this.emailModel.latest(req.listQuery.filters);
+        const email = await this.emailModel.latest(this.filters(req));
         if (!email) return res.status(404).json({ error: 'No matching email found.' });
         res.status(200).json(this.present(email));
     }
@@ -48,7 +75,8 @@ class EmailController {
     // is already stored, or with 408 after `timeout` seconds. Use `after` (or a unique recipient per test) so
     // an older email isn't picked up.
     async waitForEmail(req, res) {
-        const { filters, timeout } = req.listQuery;
+        const { timeout } = req.listQuery;
+        const filters = this.filters(req);
         const existing = await this.emailModel.latest(filters);
         if (existing) return res.status(200).json(this.present(existing));
 
@@ -79,34 +107,69 @@ class EmailController {
         return res.status(200).json(this.present(result));
     }
 
+    // Server-Sent Events: one `email` event (the email's summary) for every email stored from now on, so a
+    // dashboard or script can react without polling. Callers limited to some inboxes only see theirs.
+    streamEvents(req, res) {
+        if (this.eventStreams >= MAX_EVENT_STREAMS) return res.status(503).json({ error: 'Too many live connections.' });
+        this.eventStreams += 1;
+
+        res.set({
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            'X-Accel-Buffering': 'no', // tells nginx not to buffer the stream
+        });
+        res.flushHeaders();
+        res.write('retry: 3000\n\n');
+
+        const scope = this.scope(req);
+        const onEmail = async id => {
+            try {
+                const summary = await this.emailModel.getSummary(id);
+                if (summary && visibleTo(summary, scope)) res.write(`event: email\ndata: ${JSON.stringify(summary)}\n\n`);
+            } catch {
+                // the next email will still arrive
+            }
+        };
+        // A comment line keeps proxies and browsers from closing an idle connection
+        const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), HEARTBEAT_MS);
+        this.events.on('email', onEmail);
+        res.on('close', () => {
+            clearInterval(heartbeat);
+            this.events.off('email', onEmail);
+            this.eventStreams -= 1;
+        });
+    }
+
     async getEmail(req, res) {
         const email = await this.emailModel.get(req.validated.id);
-        if (!email) return res.status(404).json({ error: 'Email not found.' });
+        if (!email || !visibleTo(email, this.scope(req))) return res.status(404).json({ error: 'Email not found.' });
         res.status(200).json(this.present(email));
     }
 
     async getRaw(req, res) {
+        if (!(await this.hasAccess(req, res, req.validated.id))) return undefined;
         const raw = await this.emailModel.getRaw(req.validated.id);
         if (!raw) return res.status(404).json({ error: 'Email not found.' });
         res.type('text/plain; charset=utf-8');
         if (req.query.download === 'true') res.attachment(`email-${req.validated.id}.eml`).type('message/rfc822');
-        res.send(raw);
+        return res.send(raw);
     }
 
     async getAttachment(req, res) {
         const { id, attachmentId } = req.validated;
+        if (!(await this.hasAccess(req, res, id))) return undefined;
         const attachment = await this.emailModel.getAttachment(id, attachmentId);
         if (!attachment) return res.status(404).json({ error: 'Attachment not found.' });
         // Always a download, never rendered inside this origin
         res.attachment(attachment.filename);
         res.type(/^[\w.+-]+\/[\w.+-]+$/.test(attachment.contentType) ? attachment.contentType : 'application/octet-stream');
-        res.send(attachment.content);
+        return res.send(attachment.content);
     }
 
     // The HTML (or plain text) body as a standalone page for the dashboard's sandboxed iframe
     async getPreview(req, res) {
         const email = await this.emailModel.get(req.validated.id);
-        if (!email) return res.status(404).json({ error: 'Email not found.' });
+        if (!email || !visibleTo(email, this.scope(req))) return res.status(404).json({ error: 'Email not found.' });
 
         let body;
         if (email.html) {
@@ -137,14 +200,38 @@ class EmailController {
             'Cache-Control': 'no-store',
         });
         // Links open in a new tab; the page has no other way to navigate
-        res.send(`<!DOCTYPE html><meta charset="utf-8"><base target="_blank">${body}`);
+        return res.send(`<!DOCTYPE html><meta charset="utf-8"><base target="_blank">${body}`);
     }
 
     // The emails in the same conversation (In-Reply-To / References), oldest first. Empty for a single email.
     async getThread(req, res) {
         const email = await this.emailModel.get(req.validated.id);
-        if (!email) return res.status(404).json({ error: 'Email not found.' });
-        res.status(200).json({ emails: await this.emailModel.thread(email) });
+        if (!email || !visibleTo(email, this.scope(req))) return res.status(404).json({ error: 'Email not found.' });
+        const scope = this.scope(req);
+        const thread = await this.emailModel.thread(email);
+        res.status(200).json({ emails: thread.filter(item => visibleTo(item, scope)) });
+    }
+
+    // A zip of the original messages (.eml), for archiving a bug report or opening them in a mail client
+    async exportEmails(req, res) {
+        const scope = this.scope(req);
+        const wanted = [];
+        for (const id of req.validated.ids) {
+            if (await this.emailModel.isVisible(id, scope)) wanted.push(id);
+        }
+        const emails = await this.emailModel.describe(wanted);
+        if (emails.length === 0) return res.status(404).json({ error: 'No matching emails found.' });
+        if (emails.reduce((sum, email) => sum + email.size, 0) > MAX_EXPORT_BYTES) {
+            return res.status(413).json({ error: `The selected emails are larger than ${MAX_EXPORT_BYTES / 1024 / 1024} MB; export fewer.` });
+        }
+
+        const entries = [];
+        for (const email of emails) {
+            const data = await this.emailModel.getRaw(email.id);
+            if (data) entries.push({ name: `email-${email.id}-${slug(email.subject)}.eml`, data, date: new Date(email.timestamp) });
+        }
+        res.attachment('emails.zip').type('application/zip');
+        res.send(createZip(entries));
     }
 
     // Requests every link in the email and reports the status of each (admin only, see mail/linkCheck.js)
@@ -153,18 +240,20 @@ class EmailController {
         const email = await this.emailModel.get(req.validated.id);
         if (!email) return res.status(404).json({ error: 'Email not found.' });
         const { links } = this.present(email);
-        res.status(200).json(await checkLinks(links));
+        return res.status(200).json(await checkLinks(links));
     }
 
     // Dashboard "Send test": builds a message and stores it exactly like mail received over SMTP
     async sendTest(req, res) {
-        const { from, to } = req.validated;
+        const { from, to, cc, bcc } = req.validated;
         const raw = buildRawMessage(req.validated);
+        // Bcc recipients are only in the envelope, never in the message headers
+        const recipients = [...new Set([...to, ...cc, ...bcc])];
         const { id, timestamp } = await this.ingest(raw, {
-            envelope: { mailFrom: { address: from }, rcptTo: to.map(address => ({ address })) },
+            envelope: { mailFrom: { address: from }, rcptTo: recipients.map(address => ({ address })) },
             smtpUser: req.auth.username || 'dashboard',
         });
-        logToFile(`Stored test email id=${id} recipients=${to.length}`);
+        logToFile(`Stored test email id=${id} recipients=${recipients.length} attachments=${req.validated.attachments.length}`);
         res.status(201).json({ success: true, id, timestamp, message: 'Email stored successfully' });
     }
 
@@ -180,7 +269,7 @@ class EmailController {
         if (req.params.id !== undefined && deleted === 0) {
             return res.status(404).json({ error: 'Email not found.' });
         }
-        res.status(200).json({ message: 'Emails deleted successfully.', deleted });
+        return res.status(200).json({ message: 'Emails deleted successfully.', deleted });
     }
 }
 

@@ -6,12 +6,13 @@ const {
     validateIdParam,
     validateBulkDelete,
     validateAttachmentParams,
+    validateExportQuery,
     validateTestEmail,
 } = require('../middleware/validate');
 
-function createEmailRoutes({ emailModel, ingest, events, auth, config }) {
+function createEmailRoutes({ emailModel, ingest, events, auth, config, metrics }) {
     const router = express.Router();
-    const controller = new EmailController(emailModel, ingest, events, config);
+    const controller = new EmailController(emailModel, ingest, events, config, metrics);
 
     const testLimiter = rateLimit({
         windowMs: 60 * 1000,
@@ -24,6 +25,9 @@ function createEmailRoutes({ emailModel, ingest, events, auth, config }) {
     // Reading: a Read key, a viewer, or an admin
     router.get('/', auth.requireRead, validateListQuery, (req, res) => controller.getEmails(req, res));
     router.get('/latest', auth.requireRead, validateListQuery, (req, res) => controller.getLatestEmail(req, res));
+    // Live updates (Server-Sent Events) and a zip of .eml files; both before /:id
+    router.get('/stream', auth.requireRead, (req, res) => controller.streamEvents(req, res));
+    router.get('/export', auth.requireRead, validateExportQuery, (req, res) => controller.exportEmails(req, res));
     router.get('/wait', auth.requireRead, validateListQuery, (req, res) => controller.waitForEmail(req, res));
     router.get('/:id', auth.requireRead, validateIdParam, (req, res) => controller.getEmail(req, res));
     router.get('/:id/preview', auth.requireRead, validateIdParam, (req, res) => controller.getPreview(req, res));
@@ -35,7 +39,9 @@ function createEmailRoutes({ emailModel, ingest, events, auth, config }) {
 
     // Adding a test email, deleting, and checking links (the server requests them): admin only
     router.post('/:id/check-links', auth.requireAdmin, validateIdParam, (req, res) => controller.checkEmailLinks(req, res));
-    router.post('/test', testLimiter, auth.requireAdmin, validateTestEmail, (req, res) => controller.sendTest(req, res));
+    // The body may carry attachments, so it gets a bigger limit than the rest of the API, and only after the
+    // caller is known to be an admin (server.js skips its small JSON parser for this path)
+    router.post('/test', testLimiter, auth.requireAdmin, express.json({ limit: '8mb' }), validateTestEmail, (req, res) => controller.sendTest(req, res));
     router.delete('/', auth.requireAdmin, validateBulkDelete, (req, res) => controller.deleteEmails(req, res));
     router.delete('/:id', auth.requireAdmin, validateIdParam, (req, res) => controller.deleteEmails(req, res));
 

@@ -53,7 +53,17 @@ function matchesRule(rule, address) {
 
 const matchesAny = (rules, address) => rules.some(rule => matchesRule(rule, address));
 
+// Every address an email was sent to: To, Cc and the SMTP envelope (so Bcc too)
+const recipientsOf = email => [
+    ...(email.to || []).map(r => r.address),
+    ...(email.cc || []).map(r => r.address),
+    ...((email.envelope && email.envelope.to) || []),
+];
+
+// Whether an API key limited to `rules` may see the email; no rules means no limit
+const visibleTo = (email, rules) => !rules || rules.length === 0 || recipientsOf(email).some(address => matchesAny(rules, address));
+
 // The rule as it was written, for messages
 const describeRule = rule => (rule.type === 'subdomains' ? `*.${rule.value}` : rule.value);
 
-module.exports = { parseRule, parseRules, matchesRule, matchesAny, describeRule };
+module.exports = { parseRule, parseRules, matchesRule, matchesAny, describeRule, recipientsOf, visibleTo };

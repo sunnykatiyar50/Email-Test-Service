@@ -92,6 +92,7 @@
                 <div class="view-title">
                     <h1>Emails</h1>
                     <span id="messageInfo" class="muted"></span>
+                    <span id="liveStatus" class="live hidden" title="New emails appear as they arrive">Live</span>
                     <button type="button" id="rangeChip" class="filter-chip hidden" title="Clear time range">
                         <span id="rangeChipText"></span>
                         <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -115,6 +116,7 @@
                         <label class="check-label admin-only"><input type="checkbox" id="selectAllCheckbox" /> Select all</label>
                         <span id="selectionInfo" class="muted"></span>
                         <span class="spacer"></span>
+                        <button id="exportSelectedButton" type="button" class="ghost" disabled title="Download the selected emails as a zip of .eml files">Export selected</button>
                         <button id="deleteSelectedButton" type="button" class="danger-ghost admin-only" disabled>Delete selected</button>
                     </div>
                     <ul id="messageList" class="message-list"></ul>
@@ -184,6 +186,18 @@
                             <small class="field-error" id="toError"></small>
                         </div>
                     </div>
+                    <div class="field-row">
+                        <div class="field">
+                            <label for="ccInput">Cc <span class="optional">optional</span></label>
+                            <input type="text" id="ccInput" placeholder="team@example.com" autocomplete="off" />
+                            <small class="field-error" id="ccError"></small>
+                        </div>
+                        <div class="field">
+                            <label for="bccInput">Bcc <span class="optional">optional, not in the headers</span></label>
+                            <input type="text" id="bccInput" placeholder="audit@example.com" autocomplete="off" />
+                            <small class="field-error" id="bccError"></small>
+                        </div>
+                    </div>
                     <div class="field">
                         <label for="subjectInput">Subject <span class="optional">optional</span></label>
                         <input type="text" id="subjectInput" placeholder="Verify your email address" maxlength="255" autocomplete="off" />
@@ -201,6 +215,12 @@
                             <small class="field-error" id="htmlError"></small>
                             <small id="bodyCounter" class="counter"></small>
                         </div>
+                    </div>
+                    <div class="field">
+                        <label for="attachmentsInput">Attachments <span class="optional">optional, up to 5 files, 2 MB each</span></label>
+                        <input type="file" id="attachmentsInput" multiple />
+                        <ul id="attachmentList" class="file-list"></ul>
+                        <small class="field-error" id="attachmentsError"></small>
                     </div>
                     <div class="form-actions">
                         <button type="button" id="sampleEmailButton" class="link-button">Fill sample email</button>
@@ -226,7 +246,7 @@
             <header class="view-header">
                 <div class="view-title">
                     <h1>API keys</h1>
-                    <span class="muted">Read keys let your tests list emails and read verification codes and links. Mail itself arrives over SMTP, no key needed.</span>
+                    <span class="muted">Read keys let your tests list emails and read verification codes and links. A key can be limited to some inboxes. Mail itself arrives over SMTP, no key needed.</span>
                 </div>
                 <button type="button" id="newKeyButton" class="primary">New key</button>
             </header>
@@ -236,6 +256,11 @@
                     <label for="keyNameInput">Name</label>
                     <input type="text" id="keyNameInput" maxlength="64" placeholder="ci-tests" autocomplete="off" />
                     <small class="field-error" id="keyNameError"></small>
+                </div>
+                <div class="field">
+                    <label for="keyRecipientsInput">Limit to recipients <span class="optional">optional</span></label>
+                    <input type="text" id="keyRecipientsInput" placeholder="ci-1@example.com, example.org, *.test.local" autocomplete="off" />
+                    <small class="field-error" id="keyRecipientsError"></small>
                 </div>
                 <div class="key-form-actions">
                     <button type="button" id="cancelKeyButton" class="ghost">Cancel</button>
@@ -262,7 +287,7 @@
             <div class="card keys-card">
                 <table class="keys-table">
                     <thead>
-                        <tr><th>Name</th><th>Type</th><th>Key</th><th>Last used</th><th>Created</th><th></th></tr>
+                        <tr><th>Name</th><th>Type</th><th>Key</th><th>Inboxes</th><th>Last used</th><th>Created</th><th></th></tr>
                     </thead>
                     <tbody id="keysBody"></tbody>
                 </table>
@@ -327,6 +352,9 @@
                     <p class="hint">Send <code>Authorization: Bearer &lt;key&gt;</code> (or <code>X-API-Key</code>) with a <b>Read</b> key from the <a href="#/keys">API keys</a> page, or <code>ADMIN_TOKEN</code> (everything, including delete). Tests can use the <code>client/</code> helper (<code>waitForCode</code>, <code>waitForLink</code>); see the README.</p>
                     <table class="ref-table endpoints">
                         <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails/latest?to=…</code><br>Newest matching email with its body, or 404. Includes <code>code</code> (the detected one-time code, or <code>null</code>) and <code>links</code> (every http(s) link)</td></tr>
+                        <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails/stream</code><br>Server-Sent Events: one <code>email</code> event (the email's summary) per email stored from now on. The dashboard uses it to update live</td></tr>
+                        <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails/export?ids=1,2,3</code><br>A zip of the original <code>.eml</code> files (up to 100 emails)</td></tr>
+                        <tr><th><span class="method method-get">GET</span></th><td><code>/metrics</code><br>Prometheus metrics (emails received, rejections, webhook and relay results, stored emails). Same access as reading emails</td></tr>
                         <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails/wait?to=…&amp;timeout=30</code><br>Waits for a matching email (one that is already stored is returned at once), or answers <code>408</code>. Same body as <code>/latest</code>; <code>timeout</code> is 1&ndash;120 seconds</td></tr>
                         <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails</code><br>Summaries without bodies. Filters: <code>search</code>, <code>to</code> (exact address), <code>from</code>, <code>subject</code>, <code>startDate</code>, <code>endDate</code>, <code>after</code>, <code>before</code>, <code>page</code>, <code>pageSize</code> (max 100)</td></tr>
                         <tr><th><span class="method method-get">GET</span></th><td><code>/api/emails/:id</code><br>One email: <code>text</code>, <code>html</code>, <code>headers</code>, <code>attachments</code> (each with a download <code>url</code>), <code>code</code>, <code>links</code> and deliverability <code>checks</code></td></tr>
