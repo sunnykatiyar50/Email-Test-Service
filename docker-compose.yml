@@ -3,6 +3,8 @@
 #   cp sample.env .env      # then fill in the required values
 #   docker compose up -d
 #   docker compose pull && docker compose up -d     # update to the latest image
+#   IMAGE_TAG=1.2.0 docker compose up -d             # pin a released version (see the Releases page)
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build   # build from source
 #
 # Every setting comes from .env. In .env, keep SQLITE_PATH and LOG_DIR unset (or pointing inside
 # /app/data and /app/logs), otherwise the database or logs end up outside the mounted folders.
@@ -16,7 +18,7 @@
 # Full details: README.md, "Database setup".
 services:
   email-test-service:
-    image: ghcr.io/sunnykatiyar50/email-test-service:latest
+    image: ghcr.io/sunnykatiyar50/email-test-service:${IMAGE_TAG:-latest}
     init: true
     user: 1000:1000
     env_file: .env

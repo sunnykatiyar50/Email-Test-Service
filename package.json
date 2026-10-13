@@ -5,6 +5,7 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/app.js",
+    "release": "bash scripts/release.sh",
     "dev": "node --disable-warning=ExperimentalWarning --watch src/app.js",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.js\""
   },

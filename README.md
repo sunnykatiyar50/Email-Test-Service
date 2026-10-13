@@ -42,8 +42,9 @@ email-test-service
 │   ├── utils                     # otp.js, links.js, apiKeys.js, session.js, logger.js, time.js
 │   └── views                     # Dashboard (static files)
 ├── test                          # node:test suites (npm test)
-├── .github/workflows/docker.yml  # Tests, then builds and publishes the image to ghcr.io
-├── Dockerfile, docker-compose.yml, docker-entrypoint.sh
+├── .github/workflows             # docker.yml: tests, publishes the image. release.yml: GitHub Release
+├── scripts/release.sh            # Bumps the version, tags and pushes (starts the release workflows)
+├── Dockerfile, docker-compose.yml, docker-compose.build.yml, docker-entrypoint.sh
 ├── sample.env
 └── README.md
 ```
@@ -205,7 +206,27 @@ docker run -d --name email-test-service --init --restart unless-stopped \
 
 Other containers on the same Docker network reach it as `email-test-service:1025`. Behind a reverse proxy, set `TRUST_PROXY=1`. Only the dashboard goes through an HTTP proxy; SMTP needs the port published (or a TCP/stream proxy).
 
-A GitHub Actions workflow (`.github/workflows/docker.yml`) runs the tests on Node 22 and 24, then builds and publishes the image: `latest` and `sha-<commit>` on pushes to `main`, and `2.1.0`, `2.1`, `2` on a `v2.1.0` tag.
+To run a released version instead of `latest`, set `IMAGE_TAG` (for example `IMAGE_TAG=1.2.0 docker compose up -d`). To build from this source tree rather than pull the image:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+## Releasing
+
+```
+npm run release -- patch          # or minor, major, or an exact version like 1.4.0
+npm run release -- minor --dry-run   # shows the new version and the commits since the last tag, changes nothing
+```
+
+`scripts/release.sh` (needs Git Bash on Windows) checks that you're on an up-to-date `main` with a clean tree, runs the tests, bumps `package.json`, commits, tags `vX.Y.Z` and pushes. Pushing the tag starts two workflows:
+
+| Workflow | What it does |
+|----------|--------------|
+| `docker.yml` | Runs the tests on Node 22 and 24, then publishes the image as `X.Y.Z`, `X.Y`, `X` and `sha-<commit>` (pushes to `main` publish `latest`) |
+| `release.yml` | Checks the tag matches `package.json`, then creates the GitHub Release with generated notes, a `docker-compose.yml` pinned to that version, and `sample.env`. Tags with a suffix such as `v1.2.0-rc.1` are marked as pre-releases |
+
+Pull requests run the tests and build the image without publishing it.
 
 ## Database setup
 
