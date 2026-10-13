@@ -3,6 +3,9 @@
 //
 //   npm run release -- patch|minor|major|<x.y.z> [--dry-run]
 //
+// Passing the version package.json already has (the first release, for example) tags the current commit
+// without a version-bump commit.
+//
 // Pushing the tag starts two GitHub Actions workflows:
 //   docker.yml   tests, then publishes ghcr.io/<owner>/email-test-service:<version> (and :X.Y, :X)
 //   release.yml  creates the GitHub Release with notes and a docker-compose.yml pinned to the version
@@ -59,7 +62,8 @@ if (run('npm', ['test', '--silent']).status !== 0) fail('Tests failed; nothing w
 
 // Let npm work out the new version (and validate the argument), then undo the file changes until we're sure
 const current = readVersion();
-if (run('npm', ['version', bump, '--no-git-tag-version', '--silent'], { quiet: true }).status !== 0) {
+const tagOnly = bump === current;
+if (!tagOnly && run('npm', ['version', bump, '--no-git-tag-version', '--silent'], { quiet: true }).status !== 0) {
     fail(`npm could not bump ${current} by "${bump}" (an exact version must be higher than the current one).`);
 }
 const next = readVersion();
@@ -71,7 +75,7 @@ if (out('git', ['tag', '--list', tag])) {
     fail(`Tag ${tag} already exists.`);
 }
 
-console.log(`Release: ${current} -> ${next} (tag ${tag})`);
+console.log(tagOnly ? `Release: ${next} as it is (tag ${tag})` : `Release: ${current} -> ${next} (tag ${tag})`);
 if (dryRun) {
     restoreFiles();
     const lastTag = run('git', ['describe', '--tags', '--abbrev=0'], { quiet: true });
@@ -81,8 +85,10 @@ if (dryRun) {
     process.exit(0);
 }
 
-out('git', ['add', 'package.json', 'package-lock.json']);
-out('git', ['commit', '-q', '-m', `Release ${tag}`]);
+if (!tagOnly) {
+    out('git', ['add', 'package.json', 'package-lock.json']);
+    out('git', ['commit', '-q', '-m', `Release ${tag}`]);
+}
 out('git', ['tag', '-a', tag, '-m', `Release ${tag}`]);
 if (run('git', ['push', 'origin', 'main', tag]).status !== 0) {
     fail(`Push failed. The commit and tag ${tag} exist locally; fix the problem and run: git push origin main ${tag}`);
