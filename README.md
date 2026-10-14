@@ -371,7 +371,9 @@ docker compose up -d
 docker compose pull && docker compose up -d     # update later
 ```
 
-Dashboard at `http://localhost:30004`, SMTP at `localhost:1025`. Emails and logs are kept in the `email-data` and `email-logs` volumes (`docker compose down -v` deletes them). Keep `SQLITE_PATH` and `LOG_DIR` unset in `.env` when using Docker. For bind mounts instead of volumes, the folders must be writable by UID 1000 (`sudo mkdir -p ./data ./logs && sudo chown -R 1000:1000 ./data ./logs`); the container explains this at startup if not.
+Dashboard at `http://localhost:30004`, SMTP at `localhost:1025`. Emails and logs are kept in the `email-data` and `email-logs` volumes (`docker compose down -v` deletes them). Keep `SQLITE_PATH` and `LOG_DIR` unset in `.env` when using Docker. For bind mounts instead of volumes, the folders must be writable by UID 1000 (`sudo mkdir -p ./data ./logs && sudo chown -R 1000:1000 ./data ./logs`); the container explains this at startup if not. To use bind mounts, uncomment the `./data` and `./logs` lines in `docker-compose.yml` in place of the volumes.
+
+To publish SMTP over TLS, set `SMTP_TLS_PORT` in `.env` and uncomment the matching port line. For a certificate, uncomment the `./certs:/certs:ro` volume and set `SMTP_TLS_KEY=/certs/key.pem` and `SMTP_TLS_CERT=/certs/cert.pem`. To listen on a single interface only, prefix an address to the port mapping, for example `"100.110.180.13:${PORT:-30004}:${PORT:-30004}"`. For databases other than SQLite, see [Database setup](#database-setup).
 
 Without Compose:
 
@@ -408,7 +410,26 @@ Pull requests run the tests and build the image without publishing it.
 
 ## Database setup
 
-SQLite needs nothing. For PostgreSQL (the bundled container, or any server) or MySQL, set `DB_TYPE` and the `PG_*` / `MYSQL_*` variables as described in `sample.env`; the tables are created on startup, but the database itself must already exist on an external server. Attachments and the raw message are stored in the database as binary columns, so for MySQL keep `max_allowed_packet` at least as large as `MAX_EMAIL_SIZE_MB`.
+SQLite needs nothing. For PostgreSQL or MySQL, set `DB_TYPE` (`postgres` or `mysql`) and the `PG_*` / `MYSQL_*` variables in `.env` (see `sample.env`); the tables are created on startup. Attachments and the raw message are stored in the database as binary columns, so for MySQL keep `max_allowed_packet` at least as large as `MAX_EMAIL_SIZE_MB`.
+
+**External server.** Nothing to start in Compose; just point `.env` at it. The database itself must already exist.
+
+| Server is | Host to use |
+|-----------|-------------|
+| On the Docker host | `host.docker.internal` (already resolvable on Linux through `extra_hosts`) |
+| Elsewhere or hosted | its hostname, and usually `PG_SSL=true` / `MYSQL_SSL=true` |
+
+Never use `localhost`: inside the container that is the container itself.
+
+**Bundled container.** `docker-compose.yml` contains commented-out `postgres` and `mysql` services. To use one:
+
+1. Uncomment its `depends_on` entry (under `email-test-service`), its service block and its volume (`pg-data` / `mysql-data`).
+2. In `.env` set `DB_TYPE`, the credentials, and the host to the service name (`PG_HOST=postgres` or `MYSQL_HOST=mysql`). The container takes its user, password and database name from the same `PG_*` / `MYSQL_*` values.
+3. Start with the matching profile:
+
+```
+docker compose --profile postgres up -d     # or --profile mysql
+```
 
 ## Environment configuration
 
