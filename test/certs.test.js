@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const selfsigned = require('selfsigned');
 const { loadConfig } = require('../src/config');
+const { setupTls } = require('../src/certs/tlsSetup');
 const { createCertManager, readCertInfo, renewalReason } = require('../src/certs/certManager');
 const { createCloudflare } = require('../src/certs/cloudflare');
 
@@ -42,14 +43,13 @@ describe('ACME configuration', () => {
         assert.equal(config.smtpTlsCert, path.join(dir, 'cert.pem'));
     });
 
-    test('needs an email and a Cloudflare token', () => {
-        assert.throws(() => acmeConfig(tempDir(), { ACME_EMAIL: '' }), /ACME_EMAIL/);
-        assert.throws(() => acmeConfig(tempDir(), { CLOUDFLARE_API_TOKEN: '' }), /CLOUDFLARE_API_TOKEN/);
-    });
-
-    test('rejects invalid domains and a manual certificate alongside it', () => {
-        assert.throws(() => acmeConfig(tempDir(), { ACME_DOMAINS: 'localhost' }), /not a valid domain/);
-        assert.throws(() => acmeConfig(tempDir(), { SMTP_TLS_KEY: 'a.pem', SMTP_TLS_CERT: 'b.pem' }), /manages the certificate/);
+    test('reports a missing email or token, invalid domains, and a manual certificate alongside it', () => {
+        const errors = overrides => acmeConfig(tempDir(), overrides).tlsErrors.join('; ');
+        assert.match(errors({ ACME_EMAIL: '' }), /ACME_EMAIL/);
+        assert.match(errors({ CLOUDFLARE_API_TOKEN: '' }), /CLOUDFLARE_API_TOKEN/);
+        assert.match(errors({ ACME_DOMAINS: 'localhost' }), /not a valid domain/);
+        assert.match(errors({ SMTP_TLS_KEY: 'a.pem', SMTP_TLS_CERT: 'b.pem' }), /manages the certificate/);
+        assert.deepEqual(acmeConfig(tempDir(), { ACME_EMAIL: '' }).acmeDomains, []);
     });
 
     test('is off by default', () => {
@@ -153,5 +153,74 @@ describe('Cloudflare DNS client', () => {
     test('reports API errors', async () => {
         const fetchImpl = async () => ({ ok: false, status: 403, json: async () => ({ success: false, errors: [{ message: 'Invalid token' }] }) });
         await assert.rejects(createCloudflare('bad', fetchImpl).addTxt('_acme-challenge.example.com', 'x'), /Invalid token/);
+    });
+});
+
+describe('TLS setup at startup', () => {
+    const run = async (config, certManager) => {
+        const logs = [];
+        const ready = await setupTls(config, { certManager, log: message => logs.push(message) });
+        return { ready, logs };
+    };
+
+    test('does nothing when TLS is not configured', async () => {
+        const config = loadConfig(baseEnv);
+        const { ready, logs } = await run(config);
+        assert.equal(ready, false);
+        assert.deepEqual(logs, []);
+    });
+
+    test('starts without TLS and says why when the files are missing', async () => {
+        const config = loadConfig({ ...baseEnv, SMTP_TLS_KEY: '/nope/key.pem', SMTP_TLS_CERT: '/nope/cert.pem', SMTP_TLS_PORT: '1465' });
+        const { ready, logs } = await run(config);
+        assert.equal(ready, false);
+        assert.equal(config.smtpTlsKey, '');
+        assert.equal(config.smtpTlsPort, 0);
+        assert.match(logs.join(' '), /TLS is disabled.*plain SMTP only.*does not exist/s);
+    });
+
+    test('starts without TLS when the files are not valid PEM', async () => {
+        const dir = tempDir();
+        const key = path.join(dir, 'key.pem');
+        const cert = path.join(dir, 'cert.pem');
+        fs.writeFileSync(key, 'not a key');
+        fs.writeFileSync(cert, 'not a certificate');
+        const config = loadConfig({ ...baseEnv, SMTP_TLS_KEY: key, SMTP_TLS_CERT: cert });
+        const { ready, logs } = await run(config);
+        assert.equal(ready, false);
+        assert.equal(config.smtpTlsKey, '');
+        assert.match(logs.join(' '), /could not be loaded/);
+    });
+
+    test('keeps TLS on with valid files', async () => {
+        const dir = tempDir();
+        const pems = await makeCert(['localhost'], 30);
+        fs.writeFileSync(path.join(dir, 'key.pem'), pems.key);
+        fs.writeFileSync(path.join(dir, 'cert.pem'), pems.cert);
+        const config = loadConfig({ ...baseEnv, SMTP_TLS_KEY: path.join(dir, 'key.pem'), SMTP_TLS_CERT: path.join(dir, 'cert.pem') });
+        const { ready } = await run(config);
+        assert.equal(ready, true);
+        assert.ok(config.smtpTlsKey);
+    });
+
+    test("starts without TLS when the Let's Encrypt request fails and there is no certificate", async () => {
+        const config = acmeConfig(tempDir());
+        const manager = createCertManager(config, { issue: async () => { throw new Error('DNS says no'); } });
+        const { ready, logs } = await run(config, manager);
+        assert.equal(ready, false);
+        assert.equal(config.smtpTlsKey, '');
+        assert.match(logs.join(' '), /TLS is disabled.*DNS says no/s);
+    });
+
+    test('keeps using a still-valid certificate when renewal fails', async () => {
+        const config = acmeConfig(tempDir(), { ACME_RENEW_DAYS: '30' });
+        const old = await makeCert(config.acmeDomains, 10);
+        fs.writeFileSync(config.smtpTlsKey, old.key);
+        fs.writeFileSync(config.smtpTlsCert, old.cert);
+        const manager = createCertManager(config, { issue: async () => { throw new Error('rate limited'); } });
+        const { ready, logs } = await run(config, manager);
+        assert.equal(ready, true);
+        assert.ok(config.smtpTlsKey);
+        assert.match(logs.join(' '), /WARNING.*rate limited.*existing certificate/s);
     });
 });

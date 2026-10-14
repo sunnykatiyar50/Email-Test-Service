@@ -39,6 +39,29 @@ function toInt(value, fallback) {
     return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+// Everything wrong with the TLS settings; derives the key/cert paths when ACME_DOMAINS manages them
+function tlsProblems(config) {
+    const problems = [];
+    const managedCert = config.acmeDomains.length > 0;
+    if (managedCert) {
+        if (config.smtpTlsKey || config.smtpTlsCert) problems.push('ACME_DOMAINS manages the certificate itself: remove SMTP_TLS_KEY and SMTP_TLS_CERT');
+        for (const domain of config.acmeDomains) {
+            if (!DOMAIN_RE.test(domain)) problems.push(`ACME_DOMAINS: "${domain}" is not a valid domain`);
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.acmeEmail)) problems.push("ACME_DOMAINS needs ACME_EMAIL (Let's Encrypt sends expiry notices there)");
+        if (!config.cloudflareToken) problems.push('ACME_DOMAINS needs CLOUDFLARE_API_TOKEN (Zone:Read and DNS:Edit)');
+        config.smtpTlsKey = path.join(config.acmeDir, 'key.pem');
+        config.smtpTlsCert = path.join(config.acmeDir, 'cert.pem');
+    }
+    if (Boolean(config.smtpTlsKey) !== Boolean(config.smtpTlsCert)) problems.push('SMTP_TLS_KEY and SMTP_TLS_CERT must be set together');
+    for (const [name, file] of [['SMTP_TLS_KEY', config.smtpTlsKey], ['SMTP_TLS_CERT', config.smtpTlsCert]]) {
+        if (!managedCert && file && !fs.existsSync(file)) problems.push(`${name}: the file "${file}" does not exist`);
+    }
+    if (config.smtpTlsPort && !config.smtpTlsKey) problems.push('SMTP_TLS_PORT needs SMTP_TLS_KEY and SMTP_TLS_CERT');
+    if (config.smtpTlsPort && config.smtpTlsPort === config.smtpPort) problems.push('SMTP_TLS_PORT must differ from SMTP_PORT');
+    return problems;
+}
+
 function loadConfig(env = process.env) {
     const config = {
         port: toInt(env.PORT, 30004),
@@ -98,23 +121,15 @@ function loadConfig(env = process.env) {
     const setup = [];
     config.smtpAllowedDomains = ruleList('SMTP_ALLOWED_DOMAINS', env.SMTP_ALLOWED_DOMAINS, setup);
     config.relayAllow = ruleList('RELAY_ALLOW', env.RELAY_ALLOW, setup);
-    const managedCert = config.acmeDomains.length > 0;
-    if (managedCert) {
-        if (config.smtpTlsKey || config.smtpTlsCert) setup.push('ACME_DOMAINS manages the certificate itself: remove SMTP_TLS_KEY and SMTP_TLS_CERT');
-        for (const domain of config.acmeDomains) {
-            if (!DOMAIN_RE.test(domain)) setup.push(`ACME_DOMAINS: "${domain}" is not a valid domain`);
-        }
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.acmeEmail)) setup.push("ACME_DOMAINS needs ACME_EMAIL (Let's Encrypt sends expiry notices there)");
-        if (!config.cloudflareToken) setup.push('ACME_DOMAINS needs CLOUDFLARE_API_TOKEN (Zone:Read and DNS:Edit)');
-        config.smtpTlsKey = path.join(config.acmeDir, 'key.pem');
-        config.smtpTlsCert = path.join(config.acmeDir, 'cert.pem');
+    // TLS problems never stop the server: TLS is switched off and the reasons are logged at startup (see
+    // certs/tlsSetup.js), so a missing certificate can't leave the container in a restart loop.
+    config.tlsErrors = tlsProblems(config);
+    if (config.tlsErrors.length) {
+        config.smtpTlsKey = '';
+        config.smtpTlsCert = '';
+        config.smtpTlsPort = 0;
+        config.acmeDomains = [];
     }
-    if (Boolean(config.smtpTlsKey) !== Boolean(config.smtpTlsCert)) setup.push('SMTP_TLS_KEY and SMTP_TLS_CERT must be set together');
-    for (const [name, file] of [['SMTP_TLS_KEY', config.smtpTlsKey], ['SMTP_TLS_CERT', config.smtpTlsCert]]) {
-        if (!managedCert && file && !fs.existsSync(file)) setup.push(`${name}: the file "${file}" does not exist`);
-    }
-    if (config.smtpTlsPort && !config.smtpTlsKey) setup.push('SMTP_TLS_PORT needs SMTP_TLS_KEY and SMTP_TLS_CERT');
-    if (config.smtpTlsPort && config.smtpTlsPort === config.smtpPort) setup.push('SMTP_TLS_PORT must differ from SMTP_PORT');
     if (config.relayHost && config.relayAllow.length === 0) {
         setup.push('RELAY_HOST needs RELAY_ALLOW: the recipients (addresses or domains) that may be forwarded to a real mail server');
     }
