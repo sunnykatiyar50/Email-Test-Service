@@ -202,6 +202,8 @@ nodemailer.createTransport({ host: 'localhost', port: 1025, secure: false, requi
 
 In Docker, mount the files and point the variables at them (for example `-v ./certs:/certs:ro` with `SMTP_TLS_KEY=/certs/key.pem`), and publish the TLS port.
 
+**If TLS can't be set up** (missing or unreadable files, settings that don't fit together, or a failed Let's Encrypt request with no usable certificate), the server logs an `ERROR: TLS is disabled ...` line with the reason and starts with plain SMTP only: no STARTTLS and no TLS port. Fix the cause and restart to enable TLS. Look for that line in the logs if a client says STARTTLS is not offered.
+
 #### Automatic Let's Encrypt certificates
 
 Instead of managing PEM files, let the server get and renew a publicly trusted certificate (clients verify it with no workarounds). It proves ownership of the domain with a DNS record in Cloudflare, so the domain must use Cloudflare DNS and the SMTP server needs no public port 80/443.
@@ -218,7 +220,7 @@ ACME_STAGING=true                    # first run: test against the staging serve
 
 3. Start the server. The certificate is requested at startup, before the SMTP listeners open, and stored in `ACME_DIR` (`/app/data/certs` in Docker, so it is kept in the `email-data` volume). STARTTLS turns on, and so does the `SMTP_TLS_PORT` listener if you set it; both use the same certificate.
 
-Every 12 hours the server checks the certificate and renews it when fewer than `ACME_RENEW_DAYS` (30) days are left or when `ACME_DOMAINS` changed. A renewed certificate is loaded without a restart. A failed attempt is not retried for 15 minutes, to stay inside Let's Encrypt's rate limits; startup fails with the reason if there is no certificate yet. Point your apps at one of the listed names, since that is what the certificate is valid for.
+Every 12 hours the server checks the certificate and renews it when fewer than `ACME_RENEW_DAYS` (30) days are left or when `ACME_DOMAINS` changed. A renewed certificate is loaded without a restart. A failed attempt is not retried for 15 minutes, to stay inside Let's Encrypt's rate limits. Point your apps at one of the listed names, since that is what the certificate is valid for.
 
 Check or force it by hand (in Docker, prefix with `docker compose exec email-test-service`):
 

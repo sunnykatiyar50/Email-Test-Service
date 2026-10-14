@@ -11,6 +11,7 @@ const { createWebhook } = require('./mail/webhook');
 const { createRelay } = require('./mail/relay');
 const { createSmtpServer, listen: listenSmtp } = require('./mail/smtpServer');
 const { createCertManager } = require('./certs/certManager');
+const { setupTls } = require('./certs/tlsSetup');
 const { logToFile } = require('./utils/logger');
 const { Metrics } = require('./utils/metrics');
 
@@ -49,6 +50,12 @@ async function main() {
     }
     scheduleRetention(emailModel, config.retentionDays);
 
+    // TLS is optional: if it can't be set up the server starts without it (the reason is logged). With
+    // ACME_DOMAINS the Let's Encrypt certificate has to exist before the TLS listeners start.
+    const certManager = config.acmeDomains.length ? createCertManager(config, { log: logToFile }) : null;
+    const tlsReady = await setupTls(config, { certManager, log: logToFile });
+    if (tlsReady && certManager) certManager.markLoaded();
+
     const events = createEvents();
     const metrics = new Metrics();
     const webhook = createWebhook({ url: config.webhookUrl, secret: config.webhookSecret, metrics });
@@ -60,13 +67,6 @@ async function main() {
     const server = app.listen(config.port, () => {
         logToFile(`Dashboard and API are running on http://localhost:${config.port}`);
     });
-
-    // Let's Encrypt: the certificate must exist before the TLS listeners start
-    const certManager = config.acmeDomains.length ? createCertManager(config, { log: logToFile }) : null;
-    if (certManager) {
-        await certManager.ensure();
-        certManager.markLoaded();
-    }
 
     const smtp = createSmtpServer({ config, ingest, metrics });
     const smtpPort = await listenSmtp(smtp, { port: config.smtpPort, host: config.smtpHost });
@@ -82,7 +82,7 @@ async function main() {
         logToFile(`SMTP over TLS is listening on ${config.smtpHost}:${tlsPort}`);
         smtpServers.push(smtpTls);
     }
-    if (certManager) {
+    if (certManager && tlsReady) {
         // Renewals (this process or `node src/certs/cli.js renew`) are picked up without a restart
         certManager.schedule(() => {
             const tls = { key: fs.readFileSync(config.smtpTlsKey), cert: fs.readFileSync(config.smtpTlsCert) };

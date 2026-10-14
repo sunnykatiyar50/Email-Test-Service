@@ -260,10 +260,19 @@ describe('configuration', () => {
         invalid({ RELAY_HOST: 'smtp.example.com', RELAY_ALLOW: 'a@b.com', RELAY_USER: 'u' }, /RELAY_USER and RELAY_PASSWORD/);
         invalid({ RELAY_ALLOW: 'not an address' }, /RELAY_ALLOW: "not an address"/);
         invalid({ SMTP_ALLOWED_DOMAINS: 'ok.com, bad domain' }, /SMTP_ALLOWED_DOMAINS/);
-        invalid({ SMTP_TLS_KEY: __filename }, /SMTP_TLS_KEY and SMTP_TLS_CERT must be set together/);
-        invalid({ SMTP_TLS_KEY: '/nope/key.pem', SMTP_TLS_CERT: '/nope/cert.pem' }, /does not exist/);
-        invalid({ SMTP_TLS_PORT: '1465' }, /SMTP_TLS_PORT needs/);
-        invalid({ SMTP_TLS_KEY: __filename, SMTP_TLS_CERT: __filename, SMTP_TLS_PORT: '1025' }, /must differ from SMTP_PORT/);
+    });
+
+    test('TLS problems switch TLS off instead of failing', () => {
+        const tlsOff = (overrides, pattern) => {
+            const config = loadConfig({ ...env, ...overrides });
+            assert.match(config.tlsErrors.join('; '), pattern);
+            assert.equal(config.smtpTlsKey, '');
+            assert.equal(config.smtpTlsPort, 0);
+        };
+        tlsOff({ SMTP_TLS_KEY: __filename }, /SMTP_TLS_KEY and SMTP_TLS_CERT must be set together/);
+        tlsOff({ SMTP_TLS_KEY: '/nope/key.pem', SMTP_TLS_CERT: '/nope/cert.pem' }, /does not exist/);
+        tlsOff({ SMTP_TLS_PORT: '1465' }, /SMTP_TLS_PORT needs/);
+        tlsOff({ SMTP_TLS_KEY: __filename, SMTP_TLS_CERT: __filename, SMTP_TLS_PORT: '1025' }, /must differ from SMTP_PORT/);
     });
 
     test('defaults', () => {
