@@ -13,3 +13,5 @@ docker-compose.yml
 README.md
 test
 .github
+data
+certs

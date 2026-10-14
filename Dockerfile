@@ -7,7 +7,7 @@ ENV NODE_ENV=production \
     SMTP_PORT=1025 \
     DB_TYPE=sqlite \
     SQLITE_PATH=/app/data/email-db.sqlite \
-    LOG_DIR=/app/logs
+    LOG_DIR=/app/logs \n    ACME_DIR=/app/data/certs
 
 # All dependencies are pure JavaScript (SQLite uses Node's built-in node:sqlite), so no build tools are needed
 COPY package.json package-lock.json ./
