@@ -6,16 +6,8 @@
 #   IMAGE_TAG=1.2.0 docker compose up -d             # pin a released version (see the Releases page)
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build   # build from source
 #
-# Every setting comes from .env. In .env, keep SQLITE_PATH and LOG_DIR unset (or pointing inside
-# /app/data and /app/logs), otherwise the database or logs end up outside the mounted folders.
-#
-# PostgreSQL instead of SQLite: set DB_TYPE=postgres and the PG_* variables in .env. They are the
-# same for the bundled container and for any external server; only PG_HOST differs:
-#   bundled container  -> PG_HOST=postgres, start with: docker compose --profile postgres up -d
-#   Docker host        -> PG_HOST=host.docker.internal
-#   other/hosted server -> PG_HOST=<its host>, and usually PG_SSL=true for hosted databases
-# Never PG_HOST=localhost: inside the container that is the container itself.
-# Full details: README.md, "Database setup".
+# Settings come from .env. Databases (SQLite, external or bundled PostgreSQL/MySQL), bind mounts and TLS
+# certificates: see README.md, "Running with Docker" and "Database setup".
 services:
   email-test-service:
     image: ghcr.io/sunnykatiyar50/email-test-service:${IMAGE_TAG:-latest}
@@ -23,49 +15,64 @@ services:
     user: 1000:1000
     env_file: .env
     ports:
-      # Dashboard and API: the app listens on PORT from .env (30004 if unset). To listen on one interface
-      # only, prefix an address, e.g. "100.110.180.13:${PORT:-30004}:${PORT:-30004}".
       - "${PORT:-30004}:${PORT:-30004}"
-      # SMTP: where your apps send mail (SMTP_PORT from .env, 1025 if unset)
       - "${SMTP_PORT:-1025}:${SMTP_PORT:-1025}"
-      # SMTP over TLS from the first byte: publish it when SMTP_TLS_PORT is set in .env
+      # when SMTP_TLS_PORT is set:
       # - "${SMTP_TLS_PORT:-1465}:${SMTP_TLS_PORT:-1465}"
     volumes:
       - email-data:/app/data
       - email-logs:/app/logs
-      # Certificate for STARTTLS / SMTP_TLS_PORT (set SMTP_TLS_KEY=/certs/key.pem and SMTP_TLS_CERT=/certs/cert.pem)
       # - ./certs:/certs:ro
-      # Or bind mounts to host folders. They must be writable by UID 1000:
-      #   sudo mkdir -p ./data ./logs && sudo chown -R 1000:1000 ./data ./logs
+      # bind mounts instead of volumes:
       # - ./data:/app/data
       # - ./logs:/app/logs
-    # Makes host.docker.internal (the Docker host) resolvable on Linux too
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      postgres:
-        condition: service_healthy
-        required: false
+    # bundled database only:
+    # depends_on:
+    #   postgres:
+    #     condition: service_healthy
+    #     required: false
+    #   mysql:
+    #     condition: service_healthy
+    #     required: false
     restart: unless-stopped
 
-  postgres:
-    image: postgres:17-alpine
-    profiles: ["postgres"]
-    # Only the database credentials, taken from the same PG_* values in .env that the app uses
-    environment:
-      POSTGRES_USER: ${PG_USER:-mail}
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-}
-      POSTGRES_DB: ${PG_DATABASE:-mail}
-    volumes:
-      - pg-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
+  # postgres:
+  #   image: postgres:17-alpine
+  #   profiles: ["postgres"]
+  #   environment:
+  #     POSTGRES_USER: ${PG_USER:-mail}
+  #     POSTGRES_PASSWORD: ${PG_PASSWORD:-}
+  #     POSTGRES_DB: ${PG_DATABASE:-mail}
+  #   volumes:
+  #     - pg-data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
+  #   restart: unless-stopped
+
+  # mysql:
+  #   image: mysql:8.4
+  #   profiles: ["mysql"]
+  #   environment:
+  #     MYSQL_USER: ${MYSQL_USER:-mail}
+  #     MYSQL_PASSWORD: ${MYSQL_PASSWORD:-}
+  #     MYSQL_DATABASE: ${MYSQL_DATABASE:-mail}
+  #     MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+  #   volumes:
+  #     - mysql-data:/var/lib/mysql
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
+  #   restart: unless-stopped
 
 volumes:
   email-data:
   email-logs:
-  pg-data:
+  # pg-data:
+  # mysql-data:
