@@ -7,3 +7,5 @@ node_modules/*
 !sample.env
 /.idea/
 /.vscode/
+/data/
+/certs/

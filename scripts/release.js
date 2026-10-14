@@ -26,9 +26,15 @@ function fail(message) {
     process.exit(1);
 }
 
-// Runs a command in the project root. On Windows npm is npm.cmd, which only runs through a shell; git
-// must not, or arguments with spaces (commit and tag messages) get split.
+// Runs a command in the project root. On Windows npm is npm.cmd, which only runs through a shell, so
+// npm is launched as `node <npm-cli.js>` (npm_execpath is set by `npm run`) to avoid the shell and its
+// DEP0190 warning; the shell stays as a fallback when the script is run directly.
 function run(command, commandArgs, { quiet = false } = {}) {
+    const npmCli = command === 'npm' && process.env.npm_execpath;
+    if (npmCli && /\.c?js$/.test(npmCli)) {
+        commandArgs = [npmCli, ...commandArgs];
+        command = process.execPath;
+    }
     const result = spawnSync(command, commandArgs, {
         cwd: root,
         shell: process.platform === 'win32' && command === 'npm',

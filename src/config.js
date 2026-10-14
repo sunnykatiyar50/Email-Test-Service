@@ -2,6 +2,7 @@
 // Throws on invalid auth configuration so the server never starts unprotected by accident.
 
 const fs = require('fs');
+const path = require('path');
 const { parseRules } = require('./utils/recipients');
 
 // VIEWER_USERS=alice:password1,bob:password2 -> [{ username, password }]
@@ -30,6 +31,7 @@ function ruleList(name, value, problems) {
     }
 }
 
+const DOMAIN_RE = /^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
 const USERNAME_RE = /^[A-Za-z0-9._@-]{1,64}$/;
 
 function toInt(value, fallback) {
@@ -55,6 +57,13 @@ function loadConfig(env = process.env) {
         smtpTlsKey: (env.SMTP_TLS_KEY || '').trim(),
         smtpTlsCert: (env.SMTP_TLS_CERT || '').trim(),
         smtpTlsPort: toInt(env.SMTP_TLS_PORT, 0),
+        // Let's Encrypt certificate for the SMTP TLS listeners, requested and renewed automatically (see certs/)
+        acmeDomains: [...new Set((env.ACME_DOMAINS || '').split(',').map(d => d.trim().toLowerCase()).filter(Boolean))],
+        acmeEmail: (env.ACME_EMAIL || '').trim(),
+        cloudflareToken: (env.CLOUDFLARE_API_TOKEN || '').trim(),
+        acmeDir: env.ACME_DIR || './data/certs',
+        acmeStaging: env.ACME_STAGING === 'true',
+        acmeRenewDays: toInt(env.ACME_RENEW_DAYS, 30) || 30,
         // Optional relay of mail for allowlisted recipients to a real mail server (see mail/relay.js)
         relayHost: (env.RELAY_HOST || '').trim(),
         relayPort: toInt(env.RELAY_PORT, 587),
@@ -89,9 +98,20 @@ function loadConfig(env = process.env) {
     const setup = [];
     config.smtpAllowedDomains = ruleList('SMTP_ALLOWED_DOMAINS', env.SMTP_ALLOWED_DOMAINS, setup);
     config.relayAllow = ruleList('RELAY_ALLOW', env.RELAY_ALLOW, setup);
+    const managedCert = config.acmeDomains.length > 0;
+    if (managedCert) {
+        if (config.smtpTlsKey || config.smtpTlsCert) setup.push('ACME_DOMAINS manages the certificate itself: remove SMTP_TLS_KEY and SMTP_TLS_CERT');
+        for (const domain of config.acmeDomains) {
+            if (!DOMAIN_RE.test(domain)) setup.push(`ACME_DOMAINS: "${domain}" is not a valid domain`);
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.acmeEmail)) setup.push("ACME_DOMAINS needs ACME_EMAIL (Let's Encrypt sends expiry notices there)");
+        if (!config.cloudflareToken) setup.push('ACME_DOMAINS needs CLOUDFLARE_API_TOKEN (Zone:Read and DNS:Edit)');
+        config.smtpTlsKey = path.join(config.acmeDir, 'key.pem');
+        config.smtpTlsCert = path.join(config.acmeDir, 'cert.pem');
+    }
     if (Boolean(config.smtpTlsKey) !== Boolean(config.smtpTlsCert)) setup.push('SMTP_TLS_KEY and SMTP_TLS_CERT must be set together');
     for (const [name, file] of [['SMTP_TLS_KEY', config.smtpTlsKey], ['SMTP_TLS_CERT', config.smtpTlsCert]]) {
-        if (file && !fs.existsSync(file)) setup.push(`${name}: the file "${file}" does not exist`);
+        if (!managedCert && file && !fs.existsSync(file)) setup.push(`${name}: the file "${file}" does not exist`);
     }
     if (config.smtpTlsPort && !config.smtpTlsKey) setup.push('SMTP_TLS_PORT needs SMTP_TLS_KEY and SMTP_TLS_CERT');
     if (config.smtpTlsPort && config.smtpTlsPort === config.smtpPort) setup.push('SMTP_TLS_PORT must differ from SMTP_PORT');

@@ -202,6 +202,31 @@ nodemailer.createTransport({ host: 'localhost', port: 1025, secure: false, requi
 
 In Docker, mount the files and point the variables at them (for example `-v ./certs:/certs:ro` with `SMTP_TLS_KEY=/certs/key.pem`), and publish the TLS port.
 
+#### Automatic Let's Encrypt certificates
+
+Instead of managing PEM files, let the server get and renew a publicly trusted certificate (clients verify it with no workarounds). It proves ownership of the domain with a DNS record in Cloudflare, so the domain must use Cloudflare DNS and the SMTP server needs no public port 80/443.
+
+1. Create a Cloudflare API token with **Zone → Zone → Read** and **Zone → DNS → Edit** for the zone.
+2. Set in `.env` (and leave `SMTP_TLS_KEY` / `SMTP_TLS_CERT` unset):
+
+```
+ACME_DOMAINS=mail.example.com        # comma separated; a wildcard like *.example.com works too
+ACME_EMAIL=you@example.com           # Let's Encrypt sends expiry notices here
+CLOUDFLARE_API_TOKEN=...
+ACME_STAGING=true                    # first run: test against the staging server, then remove this line
+```
+
+3. Start the server. The certificate is requested at startup, before the SMTP listeners open, and stored in `ACME_DIR` (`/app/data/certs` in Docker, so it is kept in the `email-data` volume). STARTTLS turns on, and so does the `SMTP_TLS_PORT` listener if you set it; both use the same certificate.
+
+Every 12 hours the server checks the certificate and renews it when fewer than `ACME_RENEW_DAYS` (30) days are left or when `ACME_DOMAINS` changed. A renewed certificate is loaded without a restart. A failed attempt is not retried for 15 minutes, to stay inside Let's Encrypt's rate limits; startup fails with the reason if there is no certificate yet. Point your apps at one of the listed names, since that is what the certificate is valid for.
+
+Check or force it by hand (in Docker, prefix with `docker compose exec email-test-service`):
+
+```
+node src/certs/cli.js status
+node src/certs/cli.js renew --force
+```
+
 ### Relaying to a real mail server
 
 Off by default. Set `RELAY_HOST` (plus `RELAY_PORT`, default `587`, `RELAY_SECURE=true` for a TLS-only port, and `RELAY_USER` / `RELAY_PASSWORD`) and the service **also forwards** each message to a real mail server, but only to the recipients on `RELAY_ALLOW`, for example to check how a template looks in a real inbox:
@@ -445,6 +470,8 @@ See `sample.env` for a commented template.
 | `SMTP_SIMULATE` | `true` | `false` turns off the special failure recipients (`reject@` and so on) |
 | `SMTP_ALLOWED_DOMAINS` | — | Comma separated domains (`example.com`, `*.example.com`) the server accepts mail for; empty accepts everything |
 | `SMTP_TLS_KEY`, `SMTP_TLS_CERT` | — | PEM files; set both to offer STARTTLS |
+| `ACME_DOMAINS`, `ACME_EMAIL`, `CLOUDFLARE_API_TOKEN` | — | Get and renew a Let's Encrypt certificate through Cloudflare DNS (see [TLS](#tls)); replaces `SMTP_TLS_KEY` / `SMTP_TLS_CERT` |
+| `ACME_STAGING`, `ACME_RENEW_DAYS`, `ACME_DIR` | `false`, `30`, `./data/certs` | Use the Let's Encrypt staging server; renew this many days before expiry; where the key and certificate are stored |
 | `SMTP_TLS_PORT` | — | Optional second SMTP port that is TLS from the first byte (needs the key and certificate) |
 | `RELAY_HOST`, `RELAY_PORT` | —, `587` | Real mail server to forward allowlisted recipients to |
 | `RELAY_SECURE` | `false` | `true` for a TLS-only relay port (465) |

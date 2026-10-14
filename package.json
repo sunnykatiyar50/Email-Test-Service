@@ -5,11 +5,13 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/app.js",
+    "cert": "node src/certs/cli.js",
     "release": "node scripts/release.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch src/app.js",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.js\""
   },
   "dependencies": {
+    "acme-client": "^5.4.0",
     "dotenv": "^16.5.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.7.0",

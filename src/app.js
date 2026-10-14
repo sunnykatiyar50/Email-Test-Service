@@ -10,8 +10,11 @@ const { createEvents } = require('./mail/events');
 const { createWebhook } = require('./mail/webhook');
 const { createRelay } = require('./mail/relay');
 const { createSmtpServer, listen: listenSmtp } = require('./mail/smtpServer');
+const { createCertManager } = require('./certs/certManager');
 const { logToFile } = require('./utils/logger');
 const { Metrics } = require('./utils/metrics');
+
+const fs = require('fs');
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -58,6 +61,13 @@ async function main() {
         logToFile(`Dashboard and API are running on http://localhost:${config.port}`);
     });
 
+    // Let's Encrypt: the certificate must exist before the TLS listeners start
+    const certManager = config.acmeDomains.length ? createCertManager(config, { log: logToFile }) : null;
+    if (certManager) {
+        await certManager.ensure();
+        certManager.markLoaded();
+    }
+
     const smtp = createSmtpServer({ config, ingest, metrics });
     const smtpPort = await listenSmtp(smtp, { port: config.smtpPort, host: config.smtpHost });
     const tlsNote = config.smtpTlsKey ? ', STARTTLS available' : '';
@@ -71,6 +81,13 @@ async function main() {
         const tlsPort = await listenSmtp(smtpTls, { port: config.smtpTlsPort, host: config.smtpHost });
         logToFile(`SMTP over TLS is listening on ${config.smtpHost}:${tlsPort}`);
         smtpServers.push(smtpTls);
+    }
+    if (certManager) {
+        // Renewals (this process or `node src/certs/cli.js renew`) are picked up without a restart
+        certManager.schedule(() => {
+            const tls = { key: fs.readFileSync(config.smtpTlsKey), cert: fs.readFileSync(config.smtpTlsCert) };
+            for (const server of smtpServers) server.updateSecureContext(tls);
+        });
     }
     if (config.smtpAllowedDomains.length) logToFile(`SMTP accepts mail only for ${config.smtpAllowedDomains.length} allowed domain rule(s)`);
 
